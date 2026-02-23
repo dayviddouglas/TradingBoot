@@ -1,7 +1,7 @@
 package com.github.dayviddouglas.TradingBot.config;
-import com.tradingbot.engine.StrategyEngine;
-import com.github.dayviddouglas.TradingBot.strategy.BreakoutStrategy;
-import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
+
+import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
+import com.github.dayviddouglas.TradingBot.strategy.*;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -12,9 +12,11 @@ public class BotConfig {
 
     @Bean
     public List<TradingStrategy> tradingStrategies() {
-        // MVP: only Breakout. Add more strategies here.
         return List.of(
-                new BreakoutStrategy(20, 0.0005) // lookback=20, buffer=0.05%
+                new EmaRsiStrategy(12, 26, 14, 55.0, 45.0),
+                new SupportResistanceStrategy(50, 0.001),  // 0.1% tolerance
+                new PinBarStrategy(2.5, 0.7),
+                new BreakoutStrategy(20, 0.0005)          // 0.05% buffer
         );
     }
 
