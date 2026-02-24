@@ -12,7 +12,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 public class DerivMarketDataService {
@@ -21,18 +20,21 @@ public class DerivMarketDataService {
     private final DerivWsClient ws;
     private final AtomicLong reqIdSeq = new AtomicLong(1000);
 
-    // ---- handlers (callbacks) ----
-    private volatile BiConsumer<Long, Double> onTick;     // (epochSeconds, quote)
-    private volatile Consumer<Bar> onCandle;
-    private volatile Consumer<List<Bar>> onCandleHistory;
+    // ---- callbacks ----
+    private volatile TickHandler onTick;                 // (symbol, epochSeconds, quote)
+    private volatile Consumer<List<Bar>> onCandleHistory; // history response (one-shot)
+
+    @FunctionalInterface
+    public interface TickHandler {
+        void onTick(String symbol, long epochSeconds, double quote);
+    }
 
     public DerivMarketDataService(DerivWsClient ws) {
         this.ws = ws;
         this.ws.setMessageHandler(this::onWsMessage);
     }
 
-    public void onTick(BiConsumer<Long, Double> handler) { this.onTick = handler; }
-    public void onCandle(Consumer<Bar> handler) { this.onCandle = handler; }
+    public void onTick(TickHandler handler) { this.onTick = handler; }
     public void onCandleHistory(Consumer<List<Bar>> handler) { this.onCandleHistory = handler; }
 
     // ---- requests ----
@@ -44,7 +46,6 @@ public class DerivMarketDataService {
                 .add("req_id", reqId)
                 .build();
         ws.send(payload.toString());
-        log.info("Sent authorize req_id={}", reqId);
         return reqId;
     }
 
@@ -60,6 +61,9 @@ public class DerivMarketDataService {
         return reqId;
     }
 
+    /**
+     * Best-effort seed (optional). Can fail sometimes with Deriv WrongResponse.
+     */
     public long fetchCandleHistory(String symbol, int granularitySeconds, int count) {
         long reqId = reqIdSeq.getAndIncrement();
         JsonObject payload = Json.createObjectBuilder()
@@ -77,28 +81,13 @@ public class DerivMarketDataService {
         return reqId;
     }
 
-    // Keep this method if you want, but we will not use it in the runner anymore.
-    public long subscribeCandles(String symbol, int granularitySeconds) {
-        long reqId = reqIdSeq.getAndIncrement();
-        JsonObject payload = Json.createObjectBuilder()
-                .add("candles", symbol)
-                .add("subscribe", 1)
-                .add("granularity", granularitySeconds)
-                .add("req_id", reqId)
-                .build();
-        ws.send(payload.toString());
-        log.info("Subscribed candles symbol={} granularity={} req_id={}", symbol, granularitySeconds, reqId);
-        return reqId;
-    }
-
-    // ---- incoming message routing ----
+    // ---- WS routing ----
 
     private void onWsMessage(String raw) {
         try (JsonReader reader = Json.createReader(new StringReader(raw))) {
             JsonObject msg = reader.readObject();
 
             if (msg.containsKey("error")) {
-                // Log full message so we can see echo_req / msg_type
                 log.warn("Deriv error full msg: {}", msg);
                 return;
             }
@@ -107,8 +96,6 @@ public class DerivMarketDataService {
             switch (msgType) {
                 case "tick" -> handleTick(msg);
                 case "history" -> handleHistory(msg);
-                case "candles" -> handleCandles(msg);
-                case "ohlc" -> handleOhlc(msg);
                 default -> { }
             }
         } catch (Exception e) {
@@ -120,12 +107,13 @@ public class DerivMarketDataService {
         JsonObject tick = msg.getJsonObject("tick");
         if (tick == null) return;
 
+        String symbol = tick.getString("symbol", "");
+        Long epoch = getLong(tick, "epoch");
         Double quote = getDouble(tick, "quote");
-        Long epoch = getLong(tick, "epoch"); // epoch is present on tick stream
 
-        BiConsumer<Long, Double> handler = onTick;
-        if (handler != null && quote != null && epoch != null) {
-            handler.accept(epoch, quote);
+        TickHandler handler = onTick;
+        if (handler != null && !symbol.isBlank() && epoch != null && quote != null) {
+            handler.onTick(symbol, epoch, quote);
         }
     }
 
@@ -141,30 +129,8 @@ public class DerivMarketDataService {
         }
 
         bars.sort(Comparator.comparing(Bar::timestamp));
-
         Consumer<List<Bar>> handler = onCandleHistory;
         if (handler != null) handler.accept(Collections.unmodifiableList(bars));
-    }
-
-    private void handleCandles(JsonObject msg) {
-        JsonArray candles = msg.getJsonArray("candles");
-        if (candles == null || candles.isEmpty()) return;
-
-        JsonValue last = candles.get(candles.size() - 1);
-        if (last.getValueType() != JsonValue.ValueType.OBJECT) return;
-
-        Bar bar = toBar(last.asJsonObject());
-        Consumer<Bar> handler = onCandle;
-        if (handler != null && bar != null) handler.accept(bar);
-    }
-
-    private void handleOhlc(JsonObject msg) {
-        JsonObject ohlc = msg.getJsonObject("ohlc");
-        if (ohlc == null) return;
-
-        Bar bar = toBar(ohlc);
-        Consumer<Bar> handler = onCandle;
-        if (handler != null && bar != null) handler.accept(bar);
     }
 
     private Bar toBar(JsonObject node) {

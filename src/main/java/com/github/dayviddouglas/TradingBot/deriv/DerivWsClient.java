@@ -52,10 +52,8 @@ public class DerivWsClient extends WebSocketClient implements AutoCloseable {
     @Override
     public void close() {
         try {
-            closeBlocking();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("Interrupted while closing Deriv WS", e);
+            // call parent close() to avoid recursion with closeBlocking()
+            super.close();
         } catch (Exception e) {
             log.warn("Error while closing Deriv WS", e);
         }

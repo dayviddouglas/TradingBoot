@@ -14,9 +14,9 @@ public class BotConfig {
     public List<TradingStrategy> tradingStrategies() {
         return List.of(
                 new EmaRsiStrategy(12, 26, 14, 55.0, 45.0),
-                new SupportResistanceStrategy(50, 0.001),  // 0.1% tolerance
-                new PinBarStrategy(2.5, 0.7),
-                new BreakoutStrategy(20, 0.0005)          // 0.05% buffer
+                new SupportResistanceStrategy(50, 0.001),     // 0.1% tolerance
+                new PinBarStrategy(2.5, 0.7, 50, 0.001),      // pinbar only near S/R
+                new BreakoutStrategy(20, 0.0005)              // breakout w/ strong candle filter
         );
     }
 

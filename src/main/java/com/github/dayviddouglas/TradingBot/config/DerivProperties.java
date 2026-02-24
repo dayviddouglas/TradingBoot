@@ -2,16 +2,20 @@ package com.github.dayviddouglas.TradingBot.config;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotEmpty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Configure via application.yml:
+ * application.yml:
  *
  * deriv:
  *   token: "..."
  *   app-id: 1089
- *   symbol: "R_100"
+ *   symbols: ["R_100", "frxEURUSD"]
  *   candle-granularity-seconds: 60
  *   history-count: 200
  */
@@ -25,8 +29,8 @@ public class DerivProperties {
     @Min(1)
     private int appId = 1089;
 
-    @NotBlank
-    private String symbol = "R_100";
+    @NotEmpty
+    private List<String> symbols;
 
     @Min(60)
     @Max(86400)
@@ -42,8 +46,8 @@ public class DerivProperties {
     public int getAppId() { return appId; }
     public void setAppId(int appId) { this.appId = appId; }
 
-    public String getSymbol() { return symbol; }
-    public void setSymbol(String symbol) { this.symbol = symbol; }
+    public List<String> getSymbols() { return symbols; }
+    public void setSymbols(List<String> symbols) { this.symbols = symbols; }
 
     public int getCandleGranularitySeconds() { return candleGranularitySeconds; }
     public void setCandleGranularitySeconds(int candleGranularitySeconds) {

@@ -20,6 +20,10 @@ public class EmaRsiStrategy implements TradingStrategy {
     private final double rsiBuyThreshold;
     private final double rsiSellThreshold;
 
+    // (5) anti-chop filter params
+    private final int rangeLookback = 14;
+    private final double emaDistanceFactor = 0.20; // abs(emaFast-emaSlow) must exceed avgRange * factor
+
     public EmaRsiStrategy(int emaFast, int emaSlow, int rsiPeriod, double rsiBuyThreshold, double rsiSellThreshold) {
         if (emaFast < 2 || emaSlow < 2 || rsiPeriod < 2) throw new IllegalArgumentException("Periods must be >= 2");
         if (emaFast >= emaSlow) throw new IllegalArgumentException("emaFast must be < emaSlow");
@@ -37,8 +41,10 @@ public class EmaRsiStrategy implements TradingStrategy {
 
     @Override
     public Signal checkSignal(List<Bar> bars) {
-        int minBars = Math.max(emaSlow + 5, rsiPeriod + 2);
-        if (bars == null || bars.size() < minBars) return Signal.none(name());
+        if (bars == null) return Signal.none(name());
+
+        int minBars = Math.max(emaSlow + 10, Math.max(rsiPeriod + 2, rangeLookback));
+        if (bars.size() < minBars) return Signal.none(name());
 
         Bar last = bars.get(bars.size() - 1);
 
@@ -47,6 +53,15 @@ public class EmaRsiStrategy implements TradingStrategy {
         double rsiVal = rsiClose(bars, rsiPeriod);
 
         if (!Double.isFinite(emaFastVal) || !Double.isFinite(emaSlowVal) || !Double.isFinite(rsiVal)) {
+            return Signal.none(name());
+        }
+
+        // (5) compute avg range and require EMA distance
+        double avgRange = averageRange(bars, rangeLookback);
+        double emaDistance = Math.abs(emaFastVal - emaSlowVal);
+        boolean trendStrengthOk = Double.isFinite(avgRange) && emaDistance > (avgRange * emaDistanceFactor);
+
+        if (!trendStrengthOk) {
             return Signal.none(name());
         }
 
@@ -62,6 +77,9 @@ public class EmaRsiStrategy implements TradingStrategy {
         meta.put("rsiVal", rsiVal);
         meta.put("rsiBuyThreshold", rsiBuyThreshold);
         meta.put("rsiSellThreshold", rsiSellThreshold);
+        meta.put("avgRange", avgRange);
+        meta.put("emaDistance", emaDistance);
+        meta.put("emaDistanceFactor", emaDistanceFactor);
 
         if (upTrend && rsiVal >= rsiBuyThreshold) {
             return Signal.buy(name(), last.timestamp(), last.close(), meta);
@@ -78,6 +96,7 @@ public class EmaRsiStrategy implements TradingStrategy {
 
         double k = 2.0 / (period + 1.0);
 
+        // seed using SMA of the last 'period' closes
         int start = bars.size() - period;
         double sma = 0.0;
         for (int i = start; i < bars.size(); i++) sma += bars.get(i).close();
@@ -105,5 +124,16 @@ public class EmaRsiStrategy implements TradingStrategy {
         if (losses == 0.0) return 100.0;
         double rs = gains / losses;
         return 100.0 - (100.0 / (1.0 + rs));
+    }
+
+    private static double averageRange(List<Bar> bars, int lookback) {
+        if (bars.size() < lookback) return Double.NaN;
+
+        double sum = 0.0;
+        for (int i = bars.size() - lookback; i < bars.size(); i++) {
+            Bar b = bars.get(i);
+            sum += (b.high() - b.low());
+        }
+        return sum / lookback;
     }
 }
