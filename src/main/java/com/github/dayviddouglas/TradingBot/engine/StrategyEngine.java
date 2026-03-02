@@ -21,22 +21,32 @@ import java.util.Map;
 public class StrategyEngine {
     private static final Logger log = LoggerFactory.getLogger(StrategyEngine.class);
 
-    private final int maxBars;
-    private final List<Bar> bars = new ArrayList<>();
-    private final List<TradingStrategy> strategies;
+    private final String symbol;                 // NOVO: símbolo/ativo associado a este engine
+    private final int maxBars;                   // Quantidade máxima de candles armazenados
+    private final List<Bar> bars = new ArrayList<>(); // Histórico em memória
+    private final List<TradingStrategy> strategies;   // Estratégias que serão avaliadas
 
-    private Instant lastProcessedBarTime;
+    private Instant lastProcessedBarTime;        // Para evitar avaliar duas vezes o mesmo timestamp
 
-    // Volatility filter params (simple "range average" filter)
-    private final int rangeLookback = 14;
-    private final double rangeMultiplier = 1.10;
+    // (2) Filtro de volatilidade (range médio)
+    private final int rangeLookback = 14;        // Janela de cálculo do range médio
+    private final double rangeMultiplier = 1.10; // Range atual deve ser >= avgRange * multiplicador
 
-    // Anti-repetition for FINAL signal
+    // (6) Anti-repetição do sinal final
     private Signal.Type lastFinalEmitted = Signal.Type.NONE;
 
-    public StrategyEngine(int maxBars, List<TradingStrategy> strategies) {
+    /**
+     * Construtor novo: exige symbol.
+     */
+    public StrategyEngine(String symbol, int maxBars, List<TradingStrategy> strategies) {
+        if (symbol == null || symbol.isBlank()) throw new IllegalArgumentException("symbol não pode ser vazio");
+        this.symbol = symbol;
         this.maxBars = Math.max(50, maxBars);
         this.strategies = List.copyOf(strategies);
+    }
+
+    public String getSymbol() {
+        return symbol;
     }
 
     public synchronized void seedHistory(List<Bar> history) {
@@ -47,9 +57,16 @@ public class StrategyEngine {
         if (!bars.isEmpty()) {
             lastProcessedBarTime = bars.get(bars.size() - 1).timestamp();
         }
-        log.info("Seeded history. bars={}", bars.size());
+
+        log.info("Seeded history. symbol={} bars={}", symbol, bars.size());
     }
 
+    /**
+     * Atualiza o histórico com o candle novo.
+     * - se timestamp igual ao último: substitui (update do candle)
+     * - se timestamp maior: adiciona (novo candle)
+     * - se menor: ignora (fora de ordem)
+     */
     public synchronized void onBar(Bar bar) {
         if (bar == null) return;
 
@@ -69,7 +86,7 @@ public class StrategyEngine {
 
         trim();
 
-        // evaluate only on new candle timestamp
+        // Avalia somente quando chega um candle com timestamp novo
         if (lastProcessedBarTime != null && bar.timestamp().equals(lastProcessedBarTime)) {
             return;
         }
@@ -82,24 +99,24 @@ public class StrategyEngine {
         List<Bar> snapshot = List.copyOf(bars);
         Bar last = snapshot.get(snapshot.size() - 1);
 
-        // --- (2) Volatility filter (range-based) ---
+        // --- (2) filtro de volatilidade ---
         double currentRange = last.high() - last.low();
         double avgRange = averageRange(snapshot, rangeLookback);
 
         boolean volatilityOk = Double.isFinite(avgRange) && currentRange >= avgRange * rangeMultiplier;
 
         if (!volatilityOk) {
-            log.debug("Volatility filter blocked @ {} range={} avgRange={} mult={}",
-                    last.timestamp(), currentRange, avgRange, rangeMultiplier);
-            // reset anti-repetition when market is filtered (optional; keeps behavior clean)
+            log.debug("Volatility filter blocked | symbol={} | time={} | range={} avgRange={} mult={}",
+                    symbol, last.timestamp(), currentRange, avgRange, rangeMultiplier);
             lastFinalEmitted = Signal.Type.NONE;
             return;
         }
 
-        // --- collect votes from strategies ---
+        // --- coletar votos das estratégias ---
         int buyCount = 0;
         int sellCount = 0;
         int noneCount = 0;
+
         List<Signal> votes = new ArrayList<>();
 
         for (TradingStrategy s : strategies) {
@@ -118,7 +135,7 @@ public class StrategyEngine {
             }
         }
 
-        // --- (1) Confluence voting ---
+        // --- (1) regra de confluência/votação ---
         Signal finalSignal = null;
 
         if (buyCount >= 2 && sellCount == 0) {
@@ -127,6 +144,7 @@ public class StrategyEngine {
                     last.timestamp(),
                     last.close(),
                     Map.of(
+                            "symbol", symbol,
                             "buyVotes", buyCount,
                             "sellVotes", sellCount,
                             "noneVotes", noneCount,
@@ -141,6 +159,7 @@ public class StrategyEngine {
                     last.timestamp(),
                     last.close(),
                     Map.of(
+                            "symbol", symbol,
                             "buyVotes", buyCount,
                             "sellVotes", sellCount,
                             "noneVotes", noneCount,
@@ -151,25 +170,28 @@ public class StrategyEngine {
             );
         }
 
-        // --- (6) Anti-repetition (final signal) ---
+        // --- (6) anti-repetição do sinal final ---
         if (finalSignal != null) {
             if (finalSignal.getType() == lastFinalEmitted) {
-                log.debug("Final signal repeated (suppressed): {} @ {}", finalSignal.getType(), last.timestamp());
+                log.debug("Final signal repeated (suppressed) | symbol={} | type={} | time={}",
+                        symbol, finalSignal.getType(), last.timestamp());
                 return;
             }
             lastFinalEmitted = finalSignal.getType();
 
-            log.info("FINAL SIGNAL {} @ {} close={} votes(BUY={}, SELL={}, NONE={}) details={}",
+            // NOVO: inclui symbol no log final
+            log.info("FINAL SIGNAL {} | symbol={} | time={} | close={} | votes(BUY={}, SELL={}, NONE={}) | details={}",
                     finalSignal.getType(),
+                    symbol,
                     last.timestamp(),
                     last.close(),
                     buyCount, sellCount, noneCount,
-                    votes);
+                    votes
+            );
         } else {
-            // no confluence => reset so next valid signal is emitted
             lastFinalEmitted = Signal.Type.NONE;
-            log.debug("No confluence @ {} close={} votes(BUY={}, SELL={}, NONE={})",
-                    last.timestamp(), last.close(), buyCount, sellCount, noneCount);
+            log.debug("No confluence | symbol={} | time={} | close={} | votes(BUY={}, SELL={}, NONE={})",
+                    symbol, last.timestamp(), last.close(), buyCount, sellCount, noneCount);
         }
     }
 

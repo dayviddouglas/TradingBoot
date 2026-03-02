@@ -20,8 +20,4 @@ public class BotConfig {
         );
     }
 
-    @Bean
-    public StrategyEngine strategyEngine(List<TradingStrategy> strategies) {
-        return new StrategyEngine(500, strategies);
-    }
 }
