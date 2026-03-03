@@ -22,7 +22,7 @@ public class DerivHistoryDownloadTool {
 
     // ====== CONFIG FIXA (edite aqui) ======
     private static final int APP_ID = 1089;
-    private static final String SYMBOL = "frxUSDJPY";
+    private static final String SYMBOL = "frxGBPAUD";
     private static final int GRANULARITY_SECONDS = 60; // 60=1m, 300=5m
     private static final int DAYS_BACK = 90;
     private static final int COUNT_PER_REQUEST = 1000;

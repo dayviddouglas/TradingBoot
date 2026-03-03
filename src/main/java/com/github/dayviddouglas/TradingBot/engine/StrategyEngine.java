@@ -9,35 +9,26 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
-/**
- * Maintains an in-memory bar history and evaluates strategies on new bars.
- *
- * Improvements included:
- * 1) Confluence voting: emit final BUY/SELL only if >=2 strategies agree and none oppose.
- * 2) Volatility filter: only operate if current range >= avgRange * multiplier.
- * 6) Anti-repetition: do not emit the same FINAL signal type twice in a row.
- */
 public class StrategyEngine {
     private static final Logger log = LoggerFactory.getLogger(StrategyEngine.class);
 
-    private final String symbol;                 // NOVO: símbolo/ativo associado a este engine
-    private final int maxBars;                   // Quantidade máxima de candles armazenados
-    private final List<Bar> bars = new ArrayList<>(); // Histórico em memória
-    private final List<TradingStrategy> strategies;   // Estratégias que serão avaliadas
+    private final String symbol;
+    private final int maxBars;
+    private final List<Bar> bars = new ArrayList<>();
+    private final List<TradingStrategy> strategies;
 
-    private Instant lastProcessedBarTime;        // Para evitar avaliar duas vezes o mesmo timestamp
+    private Instant lastProcessedBarTime;
 
-    // (2) Filtro de volatilidade (range médio)
-    private final int rangeLookback = 14;        // Janela de cálculo do range médio
-    private final double rangeMultiplier = 1.10; // Range atual deve ser >= avgRange * multiplicador
+    private final int rangeLookback = 14;
+    private final double rangeMultiplier = 1.10;
 
-    // (6) Anti-repetição do sinal final
     private Signal.Type lastFinalEmitted = Signal.Type.NONE;
 
-    /**
-     * Construtor novo: exige symbol.
-     */
+    // NEW: callback for final signals
+    private volatile Consumer<Signal> onFinalSignal;
+
     public StrategyEngine(String symbol, int maxBars, List<TradingStrategy> strategies) {
         if (symbol == null || symbol.isBlank()) throw new IllegalArgumentException("symbol não pode ser vazio");
         this.symbol = symbol;
@@ -47,6 +38,10 @@ public class StrategyEngine {
 
     public String getSymbol() {
         return symbol;
+    }
+
+    public void onFinalSignal(Consumer<Signal> handler) {
+        this.onFinalSignal = handler;
     }
 
     public synchronized void seedHistory(List<Bar> history) {
@@ -61,12 +56,6 @@ public class StrategyEngine {
         log.info("Seeded history. symbol={} bars={}", symbol, bars.size());
     }
 
-    /**
-     * Atualiza o histórico com o candle novo.
-     * - se timestamp igual ao último: substitui (update do candle)
-     * - se timestamp maior: adiciona (novo candle)
-     * - se menor: ignora (fora de ordem)
-     */
     public synchronized void onBar(Bar bar) {
         if (bar == null) return;
 
@@ -86,7 +75,6 @@ public class StrategyEngine {
 
         trim();
 
-        // Avalia somente quando chega um candle com timestamp novo
         if (lastProcessedBarTime != null && bar.timestamp().equals(lastProcessedBarTime)) {
             return;
         }
@@ -99,7 +87,6 @@ public class StrategyEngine {
         List<Bar> snapshot = List.copyOf(bars);
         Bar last = snapshot.get(snapshot.size() - 1);
 
-        // --- (2) filtro de volatilidade ---
         double currentRange = last.high() - last.low();
         double avgRange = averageRange(snapshot, rangeLookback);
 
@@ -112,7 +99,6 @@ public class StrategyEngine {
             return;
         }
 
-        // --- coletar votos das estratégias ---
         int buyCount = 0;
         int sellCount = 0;
         int noneCount = 0;
@@ -123,19 +109,12 @@ public class StrategyEngine {
             Signal signal = s.checkSignal(snapshot);
 
             switch (signal.getType()) {
-                case BUY -> {
-                    buyCount++;
-                    votes.add(signal);
-                }
-                case SELL -> {
-                    sellCount++;
-                    votes.add(signal);
-                }
+                case BUY -> { buyCount++; votes.add(signal); }
+                case SELL -> { sellCount++; votes.add(signal); }
                 case NONE -> noneCount++;
             }
         }
 
-        // --- (1) regra de confluência/votação ---
         Signal finalSignal = null;
 
         if (buyCount >= 2 && sellCount == 0) {
@@ -170,7 +149,6 @@ public class StrategyEngine {
             );
         }
 
-        // --- (6) anti-repetição do sinal final ---
         if (finalSignal != null) {
             if (finalSignal.getType() == lastFinalEmitted) {
                 log.debug("Final signal repeated (suppressed) | symbol={} | type={} | time={}",
@@ -179,7 +157,6 @@ public class StrategyEngine {
             }
             lastFinalEmitted = finalSignal.getType();
 
-            // NOVO: inclui symbol no log final
             log.info("FINAL SIGNAL {} | symbol={} | time={} | close={} | votes(BUY={}, SELL={}, NONE={}) | details={}",
                     finalSignal.getType(),
                     symbol,
@@ -188,6 +165,16 @@ public class StrategyEngine {
                     buyCount, sellCount, noneCount,
                     votes
             );
+
+            // NEW: notify
+            Consumer<Signal> cb = onFinalSignal;
+            if (cb != null) {
+                try {
+                    cb.accept(finalSignal);
+                } catch (Exception e) {
+                    log.warn("onFinalSignal callback error | symbol={} | time={}", symbol, last.timestamp(), e);
+                }
+            }
         } else {
             lastFinalEmitted = Signal.Type.NONE;
             log.debug("No confluence | symbol={} | time={} | close={} | votes(BUY={}, SELL={}, NONE={})",

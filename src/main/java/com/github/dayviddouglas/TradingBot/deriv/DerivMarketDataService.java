@@ -1,17 +1,20 @@
 package com.github.dayviddouglas.TradingBot.deriv;
 
+import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.node.ObjectNode;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 public class DerivMarketDataService {
@@ -21,9 +24,16 @@ public class DerivMarketDataService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicLong reqIdSeq = new AtomicLong(1000);
 
-    // callbacks
     private volatile TickHandler onTick;
-    private volatile Consumer<List<Bar>> onCandleHistory;
+    private volatile BiConsumer<Long, List<Bar>> onCandleHistory;
+
+    // streaming open contract updates (trade) - may be unreliable in your current environment
+    private volatile Consumer<JsonNode> onOpenContract;
+
+    private final Map<Long, CompletableFuture<JsonNode>> pendingByReqId = new ConcurrentHashMap<>();
+
+    // optional diagnostics
+    private volatile boolean logRawProposalOpenContract = false;
 
     @FunctionalInterface
     public interface TickHandler {
@@ -36,21 +46,44 @@ public class DerivMarketDataService {
     }
 
     public void onTick(TickHandler handler) { this.onTick = handler; }
-    public void onCandleHistory(Consumer<List<Bar>> handler) { this.onCandleHistory = handler; }
 
-    // ---- requests (JSON) ----
+    /** history callback routed by req_id */
+    public void onCandleHistory(BiConsumer<Long, List<Bar>> handler) { this.onCandleHistory = handler; }
 
-    public long authorize(String token) {
-        long reqId = reqIdSeq.getAndIncrement();
+    public void onOpenContract(Consumer<JsonNode> handler) { this.onOpenContract = handler; }
+
+    public void setLogRawProposalOpenContract(boolean enabled) {
+        this.logRawProposalOpenContract = enabled;
+    }
+
+    // ----------------------------
+    // Requests
+    // ----------------------------
+
+    public CompletableFuture<JsonNode> authorize(String token) {
+        long reqId = nextReqId();
         ObjectNode payload = mapper.createObjectNode();
         payload.put("authorize", token);
         payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
         ws.send(payload.toString());
-        return reqId;
+        return fut;
+    }
+
+    public void authorizeAndWaitFailFast(String token, Duration timeout) {
+        try {
+            authorize(token)
+                    .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .join();
+            log.info("Authorize OK");
+        } catch (Exception e) {
+            throw new IllegalStateException("Falha no authorize (token inválido/sem permissão/trade indisponível)", e);
+        }
     }
 
     public long subscribeTicks(String symbol) {
-        long reqId = reqIdSeq.getAndIncrement();
+        long reqId = nextReqId();
         ObjectNode payload = mapper.createObjectNode();
         payload.put("ticks", symbol);
         payload.put("subscribe", 1);
@@ -61,7 +94,7 @@ public class DerivMarketDataService {
     }
 
     public long fetchCandleHistory(String symbol, int granularitySeconds, int count) {
-        long reqId = reqIdSeq.getAndIncrement();
+        long reqId = nextReqId();
         ObjectNode payload = mapper.createObjectNode();
         payload.put("ticks_history", symbol);
         payload.put("adjust_start_time", 1);
@@ -76,26 +109,151 @@ public class DerivMarketDataService {
         return reqId;
     }
 
-    // ---- WS routing ----
+    // ---- TRADE requests ----
+
+    public CompletableFuture<JsonNode> requestProposal(String symbol,
+                                                       String contractType,
+                                                       double amount,
+                                                       String currency,
+                                                       int duration,
+                                                       String durationUnit) {
+        long reqId = nextReqId();
+
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("proposal", 1);
+        payload.put("symbol", symbol);
+        payload.put("contract_type", contractType);
+        payload.put("amount", amount);
+        payload.put("basis", "stake");
+        payload.put("currency", currency);
+        payload.put("duration", duration);
+        payload.put("duration_unit", durationUnit);
+        payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
+        ws.send(payload.toString());
+        return fut;
+    }
+
+    public CompletableFuture<JsonNode> buy(String proposalId, double price) {
+        long reqId = nextReqId();
+
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("buy", proposalId);
+        payload.put("price", price);
+        payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
+        ws.send(payload.toString());
+        return fut;
+    }
+
+    public CompletableFuture<JsonNode> subscribeOpenContract(long contractId) {
+        long reqId = nextReqId();
+
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("proposal_open_contract", 1);
+        payload.put("contract_id", contractId);
+        payload.put("subscribe", 1);
+        payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
+        ws.send(payload.toString());
+        return fut;
+    }
+
+    /**
+     * NEW: One-shot query (poll) for an open/closed contract state.
+     * This is the fallback when streaming updates don't arrive.
+     */
+    public CompletableFuture<JsonNode> getOpenContractOnce(long contractId) {
+        long reqId = nextReqId();
+
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("proposal_open_contract", 1);
+        payload.put("contract_id", contractId);
+        // Do NOT set subscribe here (or explicitly subscribe=0)
+        payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
+        ws.send(payload.toString());
+        return fut;
+    }
+
+    /**
+     * Optional: stop a subscription.
+     */
+    public CompletableFuture<JsonNode> forget(String subscriptionId) {
+        long reqId = nextReqId();
+
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("forget", subscriptionId);
+        payload.put("req_id", reqId);
+
+        CompletableFuture<JsonNode> fut = register(reqId);
+        ws.send(payload.toString());
+        return fut;
+    }
+
+    // ----------------------------
+    // WS routing
+    // ----------------------------
 
     private void onWsMessage(String raw) {
         try {
             JsonNode msg = mapper.readTree(raw);
 
             if (msg.has("error")) {
-                log.warn("Deriv error full msg: {}", msg.toString());
+                handleDerivError(msg);
                 return;
             }
 
             String msgType = msg.path("msg_type").asText("");
             switch (msgType) {
                 case "tick" -> handleTick(msg);
-                case "history" -> handleHistory(msg);
-                default -> { }
+
+                // Deriv often returns msg_type="candles" for ticks_history(style=candles)
+                case "history", "candles" -> handleHistory(msg);
+
+                case "authorize", "proposal", "buy", "forget", "proposal_open_contract" -> {
+                    // complete one-shot futures (req_id bound)
+                    completeReq(msg);
+
+                    // stream contract updates
+                    if ("proposal_open_contract".equals(msgType)) {
+                        if (logRawProposalOpenContract) {
+                            log.info("RAW POC: {}", msg.toString());
+                        }
+                        Consumer<JsonNode> handler = onOpenContract;
+                        if (handler != null) handler.accept(msg);
+                    }
+                }
+
+                default -> { /* ignore */ }
             }
         } catch (Exception e) {
             log.warn("Failed to handle WS message raw={}", raw, e);
         }
+    }
+
+    private void handleDerivError(JsonNode msg) {
+        String errMessage = msg.path("error").path("message").asText("Deriv error");
+        long reqId = msg.path("req_id").asLong(-1);
+
+        log.warn("Deriv error. req_id={} message={} full={}", reqId, errMessage, msg.toString());
+
+        if (reqId > 0) {
+            CompletableFuture<JsonNode> fut = pendingByReqId.remove(reqId);
+            if (fut != null) fut.completeExceptionally(new DerivErrorException(errMessage));
+        }
+    }
+
+    private void completeReq(JsonNode msg) {
+        long reqId = msg.path("req_id").asLong(-1);
+        if (reqId <= 0) return;
+
+        CompletableFuture<JsonNode> fut = pendingByReqId.get(reqId);
+        if (fut != null) fut.complete(msg);
     }
 
     private void handleTick(JsonNode msg) {
@@ -124,8 +282,9 @@ public class DerivMarketDataService {
 
         bars.sort(Comparator.comparing(Bar::timestamp));
 
-        Consumer<List<Bar>> handler = onCandleHistory;
-        if (handler != null) handler.accept(List.copyOf(bars));
+        long reqId = msg.path("req_id").asLong(-1);
+        BiConsumer<Long, List<Bar>> handler = onCandleHistory;
+        if (handler != null) handler.accept(reqId, List.copyOf(bars));
     }
 
     private Bar toBar(JsonNode node) {
@@ -143,5 +302,26 @@ public class DerivMarketDataService {
         }
 
         return new Bar(Instant.ofEpochSecond(epoch), open, high, low, close, volume);
+    }
+
+    private long nextReqId() {
+        return reqIdSeq.getAndIncrement();
+    }
+
+    private CompletableFuture<JsonNode> register(long reqId) {
+        CompletableFuture<JsonNode> fut = new CompletableFuture<>();
+        pendingByReqId.put(reqId, fut);
+        fut.whenComplete((ok, err) -> pendingByReqId.remove(reqId)); // avoid memory leak
+        return fut;
+    }
+
+    @SuppressWarnings("unused")
+    private static List<String> sortedFieldNames(JsonNode node) {
+        if (node == null || !node.isObject()) return List.of();
+        List<String> names = new ArrayList<>();
+        Iterator<String> it = node.fieldNames();
+        while (it.hasNext()) names.add(it.next());
+        names.sort(String::compareTo);
+        return names;
     }
 }

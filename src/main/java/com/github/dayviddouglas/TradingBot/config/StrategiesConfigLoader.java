@@ -62,6 +62,9 @@ public class StrategiesConfigLoader {
 
                     p.setEngine(toMap(mapper, pNode.get("engine")));
 
+                    // NEW: trade config (optional)
+                    p.setTrade(readTradeConfig(mapper, pNode.get("trade")));
+
                     JsonNode strategiesNode = pNode.get("strategies");
                     if (strategiesNode == null || !strategiesNode.isObject()) {
                         throw new IllegalStateException("Profile inválido (symbol=" + symbol + "): strategies ausente");
@@ -100,6 +103,16 @@ public class StrategiesConfigLoader {
         }
     }
 
+    private static TradeConfig readTradeConfig(ObjectMapper mapper, JsonNode tradeNode) {
+        // Default: trade disabled
+        if (tradeNode == null || tradeNode.isNull() || !tradeNode.isObject()) {
+            return new TradeConfig();
+        }
+        TradeConfig cfg = mapper.convertValue(tradeNode, TradeConfig.class);
+        if (cfg == null) cfg = new TradeConfig();
+        return cfg;
+    }
+
     private static void validate(StrategiesProfile p) {
         if (p.getSymbol() == null || p.getSymbol().isBlank()) {
             throw new IllegalStateException("Profile inválido: symbol vazio");
@@ -109,6 +122,29 @@ public class StrategiesConfigLoader {
         }
         if (p.getStrategies() == null || p.getStrategies().isEmpty()) {
             throw new IllegalStateException("Profile inválido: strategies vazio para symbol=" + p.getSymbol());
+        }
+
+        // NEW: validate trade config
+        TradeConfig t = p.getTrade();
+        if (t == null) {
+            p.setTrade(new TradeConfig());
+            return;
+        }
+
+        if (t.isEnabled()) {
+            if (!(t.getAmount() > 0.0)) {
+                throw new IllegalStateException("Trade inválido: amount must be > 0 para symbol=" + p.getSymbol());
+            }
+            if (t.getCurrency() == null || t.getCurrency().isBlank()) {
+                throw new IllegalStateException("Trade inválido: currency vazia para symbol=" + p.getSymbol());
+            }
+            if (t.getDuration() < 1) {
+                throw new IllegalStateException("Trade inválido: duration < 1 para symbol=" + p.getSymbol());
+            }
+            String unit = (t.getDurationUnit() == null) ? "" : t.getDurationUnit().trim();
+            if (!unit.equals("m") && !unit.equals("s") && !unit.equals("h") && !unit.equals("d")) {
+                throw new IllegalStateException("Trade inválido: durationUnit deve ser um de [s,m,h,d] para symbol=" + p.getSymbol());
+            }
         }
     }
 

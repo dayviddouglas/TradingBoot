@@ -3,6 +3,7 @@ import com.github.dayviddouglas.TradingBot.config.DerivProperties;
 import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
+import com.github.dayviddouglas.TradingBot.deriv.DerivTradeService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivWsClient;
 import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.market.TickCandleAggregator;
@@ -15,8 +16,11 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class MultiSymbolDerivBotRunner implements ApplicationRunner {
@@ -24,38 +28,80 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
 
     private final DerivProperties derivProps;
     private final StrategiesConfigLoader strategiesLoader;
+    private final DerivTradeService tradeService;
 
-    public MultiSymbolDerivBotRunner(DerivProperties derivProps, StrategiesConfigLoader strategiesLoader) {
+    // injected beans (Option A)
+    private final DerivWsClient ws;
+    private final DerivMarketDataService md;
+
+    public MultiSymbolDerivBotRunner(DerivProperties derivProps,
+                                     StrategiesConfigLoader strategiesLoader,
+                                     DerivTradeService tradeService,
+                                     DerivWsClient ws,
+                                     DerivMarketDataService md) {
         this.derivProps = derivProps;
         this.strategiesLoader = strategiesLoader;
+        this.tradeService = tradeService;
+        this.ws = ws;
+        this.md = md;
     }
+
+    private record HistoryRoute(String symbol, int granularitySeconds, String engineKey) {}
 
     @Override
     public void run(ApplicationArguments args) throws Exception {
         List<StrategiesProfile> profiles = strategiesLoader.getProfiles();
         if (profiles.isEmpty()) throw new IllegalStateException("Nenhum profile encontrado em configs/strategies.json");
 
-        String endpoint = "wss://ws.derivws.com/websockets/v3?app_id=" + derivProps.getAppId();
-        log.info("Starting bot (profiles from strategies.json). endpoint={} profiles={}", endpoint, profiles.size());
+        log.info("Starting bot (profiles from strategies.json). appId={} profiles={}",
+                derivProps.getAppId(), profiles.size());
 
-        DerivWsClient ws = new DerivWsClient(new URI(endpoint));
-        DerivMarketDataService md = new DerivMarketDataService(ws);
-
-        // Chave única por (symbol + granularity)
+        // Key by (symbol + granularity)
         Map<String, StrategyEngine> engines = new HashMap<>();
         Map<String, TickCandleAggregator> aggregators = new HashMap<>();
 
-        // 1) Monta engines e aggregators para todos profiles
+        // req_id -> routing context (symbol/gran/engineKey)
+        Map<Long, HistoryRoute> historyReqRoutes = new ConcurrentHashMap<>();
+
+        // Enable temporarily to capture raw proposal_open_contract stream JSON
+        // IMPORTANT: set to false after diagnostics (it can be very noisy)
+        md.setLogRawProposalOpenContract(true);
+
+        // History callback routed by req_id
+        md.onCandleHistory((reqId, bars) -> {
+            HistoryRoute route = historyReqRoutes.remove(reqId);
+            if (route == null) {
+                log.debug("History received but no routing found for req_id={} (ignored). bars={}", reqId, bars.size());
+                return;
+            }
+
+            StrategyEngine engine = engines.get(route.engineKey());
+            if (engine == null) {
+                log.warn("History routing found but engine missing. req_id={} symbol={} granularity={} engineKey={}",
+                        reqId, route.symbol(), route.granularitySeconds(), route.engineKey());
+                return;
+            }
+
+            engine.seedHistory(bars);
+
+            log.info("History seeded | req_id={} | symbol={} | granularity={} | engineKey={} | bars={}",
+                    reqId, route.symbol(), route.granularitySeconds(), route.engineKey(), bars.size());
+        });
+
+        // Build engines + aggregators
         for (StrategiesProfile p : profiles) {
             String symbol = p.getSymbol();
             int gran = p.getGranularitySeconds();
             String key = key(symbol, gran);
 
             int maxBars = getInt(p.getEngine(), "maxBars", 500);
-
             List<TradingStrategy> strategies = buildStrategiesFromProfile(p);
 
             StrategyEngine engine = new StrategyEngine(symbol, maxBars, strategies);
+
+            // connect final signal -> trade service
+            engine.onFinalSignal(sig -> tradeService.onFinalSignal(p, sig));
+
             engines.put(key, engine);
 
             TickCandleAggregator agg = new TickCandleAggregator(
@@ -64,11 +110,11 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             );
             aggregators.put(key, agg);
 
-            log.info("Profile loaded: symbol={} granularitySeconds={} maxBars={} strategies={}",
-                    symbol, gran, maxBars, strategies.size());
+            log.info("Profile loaded: symbol={} granularitySeconds={} maxBars={} strategies={} tradeEnabled={}",
+                    symbol, gran, maxBars, strategies.size(), p.getTrade() != null && p.getTrade().isEnabled());
         }
 
-        // 2) Roteia ticks por symbol -> alimenta todos aggregators daquele symbol (pode ter vários granularities)
+        // Tick routing by symbol -> all aggregators for that symbol
         md.onTick((symbol, epoch, quote) -> {
             for (StrategiesProfile p : profiles) {
                 if (!p.getSymbol().equals(symbol)) continue;
@@ -79,25 +125,56 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             }
         });
 
-        // 3) Conecta
-        ws.connectBlocking(10, TimeUnit.SECONDS);
-
-        // 4) Autoriza (necessário se quiser evoluir para execução de trades)
-        md.authorize(derivProps.getToken());
-
-        // 5) Seed best-effort (opcional): tenta baixar histórico para cada profile
-        for (StrategiesProfile p : profiles) {
-            md.fetchCandleHistory(p.getSymbol(), p.getGranularitySeconds(), derivProps.getHistoryCount());
-        }
-
-        // 6) Subscribe ticks: apenas 1x por symbol
+        // Unique symbols
         Set<String> uniqueSymbols = new HashSet<>();
         for (StrategiesProfile p : profiles) uniqueSymbols.add(p.getSymbol());
 
-        for (String symbol : uniqueSymbols) {
-            log.info("Subscribing ticks for symbol={}", symbol);
-            md.subscribeTicks(symbol);
-        }
+        // prevent overlapping bootstraps (in case of reconnect storms)
+        AtomicBoolean bootstrapping = new AtomicBoolean(false);
+
+        Runnable bootstrap = () -> {
+            if (!bootstrapping.compareAndSet(false, true)) return;
+
+            try {
+                // authorize (timeout increased to reduce false fail-fast)
+                md.authorizeAndWaitFailFast(derivProps.getToken(), Duration.ofSeconds(30));
+
+                // seed history best-effort (req_id -> engineKey)
+                for (StrategiesProfile p : profiles) {
+                    String symbol = p.getSymbol();
+                    int gran = p.getGranularitySeconds();
+                    String engineKey = key(symbol, gran);
+
+                    long reqId = md.fetchCandleHistory(symbol, gran, derivProps.getHistoryCount());
+                    historyReqRoutes.put(reqId, new HistoryRoute(symbol, gran, engineKey));
+
+                    log.info("History requested | req_id={} | symbol={} | granularity={} | engineKey={}",
+                            reqId, symbol, gran, engineKey);
+                }
+
+                // subscribe ticks (needed after reconnect too)
+                for (String symbol : uniqueSymbols) {
+                    log.info("Subscribing ticks for symbol={}", symbol);
+                    md.subscribeTicks(symbol);
+                }
+
+                log.info("Bootstrap OK (authorize + history + subscriptions). symbols={} profiles={}",
+                        uniqueSymbols.size(), profiles.size());
+
+            } catch (Exception e) {
+                log.warn("Bootstrap failed: {}", e.getMessage(), e);
+            } finally {
+                bootstrapping.set(false);
+            }
+        };
+
+        // Hook lifecycle in WS client (bootstrap runs onOpen)
+        ws.setOnConnected(bootstrap);
+        ws.setOnDisconnected(evt -> log.warn("WS disconnected (event) code={} remote={} reason={}",
+                evt.code(), evt.remote(), evt.reason()));
+
+        // Connect first time
+        ws.connectBlocking(10, TimeUnit.SECONDS);
 
         log.info("Bot is running with {} symbols and {} profiles. Press Ctrl+C to stop.",
                 uniqueSymbols.size(), profiles.size());
@@ -145,7 +222,6 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
 
         List<TradingStrategy> list = new ArrayList<>();
 
-        // EMA+RSI
         Map<String, Object> emaRsi = s.get("emaRsi");
         if (getBool(emaRsi, "enabled", false)) {
             int emaFast = getInt(emaRsi, "emaFast", 12);
@@ -156,7 +232,6 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             list.add(new EmaRsiStrategy(emaFast, emaSlow, rsiPeriod, rsiBuy, rsiSell));
         }
 
-        // Support/Resistance
         Map<String, Object> sr = s.get("supportResistance");
         if (getBool(sr, "enabled", false)) {
             int lookback = getInt(sr, "lookback", 50);
@@ -164,7 +239,6 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             list.add(new SupportResistanceStrategy(lookback, tol));
         }
 
-        // PinBar
         Map<String, Object> pin = s.get("pinBar");
         if (getBool(pin, "enabled", false)) {
             double wickToBody = getDouble(pin, "wickToBodyRatio", 2.5);
@@ -174,7 +248,6 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             list.add(new PinBarStrategy(wickToBody, maxOpp, srLookback, tol));
         }
 
-        // Breakout
         Map<String, Object> br = s.get("breakout");
         if (getBool(br, "enabled", false)) {
             int lookback = getInt(br, "lookback", 20);
@@ -182,7 +255,6 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
             list.add(new BreakoutStrategy(lookback, buffer));
         }
 
-        // Requisito: se não tiver nenhuma estratégia habilitada, falha
         if (list.isEmpty()) {
             throw new IllegalStateException("Nenhuma estratégia habilitada no profile: symbol=" + p.getSymbol());
         }
