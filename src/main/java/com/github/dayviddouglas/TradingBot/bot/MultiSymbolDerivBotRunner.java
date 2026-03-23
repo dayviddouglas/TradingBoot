@@ -65,7 +65,7 @@ public class MultiSymbolDerivBotRunner implements ApplicationRunner {
 
         // Enable temporarily to capture raw proposal_open_contract stream JSON
         // IMPORTANT: set to false after diagnostics (it can be very noisy)
-        md.setLogRawProposalOpenContract(true);
+        md.setLogRawProposalOpenContract(false);
 
         // History callback routed by req_id
         md.onCandleHistory((reqId, bars) -> {
