@@ -1,173 +1,152 @@
 package com.github.dayviddouglas.TradingBot.config;
 
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.stereotype.Component;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
+/**
+ * Fonte única de verdade para carregamento de profiles de estratégias.
+ *
+ * Responsabilidades:
+ * - Carregar strategies.json do classpath (startup) ou filesystem (backtest)
+ * - Parsear e validar StrategiesProfile
+ * - Delegar construção de estratégias ao StrategyBuilder
+ *
+ * Após refatoração, esta classe tem responsabilidade única:
+ * carregar e fornecer profiles validados.
+ * A construção de estratégias foi delegada ao StrategyBuilder.
+ *
+ * Fluxo de carregamento:
+ * 1. Construtor carrega automaticamente do classpath (fail-fast)
+ * 2. loadProfiles() permite carregar de path externo (backtest)
+ * 3. buildStrategies() delega para StrategyBuilder
+ */
 @Component
 public class StrategiesConfigLoader {
 
+    private static final String DEFAULT_CLASSPATH = "configs/strategies.json";
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final StrategyBuilder strategyBuilder;
+    private final StrategiesProfileParser profileParser;
     private final List<StrategiesProfile> profiles;
 
-    public StrategiesConfigLoader() {
-        this.profiles = loadFromClasspath("configs/strategies.json");
+    /**
+     * Construtor invocado pelo Spring.
+     * Carrega o strategies.json do classpath no startup (fail-fast).
+     *
+     * @param strategyBuilder builder de estratégias
+     * @param profileParser   parser e validador de profiles
+     */
+    public StrategiesConfigLoader(
+            StrategyBuilder strategyBuilder,
+            StrategiesProfileParser profileParser
+    ) {
+        this.strategyBuilder = strategyBuilder;
+        this.profileParser = profileParser;
+        this.profiles = loadFromClasspath(DEFAULT_CLASSPATH);
     }
 
+    /**
+     * Retorna os profiles carregados no startup.
+     * Utilizado pelo MultiSymbolDerivBotRunner.
+     *
+     * @return lista imutável de profiles
+     */
     public List<StrategiesProfile> getProfiles() {
         return profiles;
     }
 
+    /**
+     * Carrega profiles de um path externo com fallback para classpath.
+     * Utilizado pelo BacktestRunner.
+     *
+     * @param path caminho do arquivo (filesystem ou classpath)
+     * @return lista de profiles carregados
+     */
+    public List<StrategiesProfile> loadProfiles(String path) {
+        if (isValidFilesystemPath(path)) {
+            return loadFromFilesystem(Path.of(path));
+        }
+        return loadFromClasspath(path);
+    }
+
+    /**
+     * Busca um profile pelo símbolo e granularidade.
+     *
+     * @param symbol             símbolo do ativo
+     * @param granularitySeconds granularidade em segundos
+     * @return profile correspondente
+     * @throws IllegalStateException se o profile não existir
+     */
     public StrategiesProfile requireProfile(String symbol, int granularitySeconds) {
         return profiles.stream()
-                .filter(p -> Objects.equals(p.getSymbol(), symbol) && p.getGranularitySeconds() == granularitySeconds)
+                .filter(p -> Objects.equals(p.getSymbol(), symbol)
+                        && p.getGranularitySeconds() == granularitySeconds)
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
-                        "Não existe profile no strategies.json para symbol=" + symbol +
-                                " granularitySeconds=" + granularitySeconds
-                ));
+                        "Profile not found in strategies.json for symbol="
+                                + symbol + " granularitySeconds=" + granularitySeconds));
     }
 
-    private static List<StrategiesProfile> loadFromClasspath(String classpathLocation) {
+    /**
+     * Constrói estratégias para o profile delegando ao StrategyBuilder.
+     *
+     * @param profile profile do ativo
+     * @return lista de estratégias habilitadas
+     */
+    public List<TradingStrategy> buildStrategies(StrategiesProfile profile) {
+        return strategyBuilder.build(profile.getStrategies());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Carregamento
+    // ═══════════════════════════════════════════════════════════════
+
+    private List<StrategiesProfile> loadFromClasspath(String classpathLocation) {
         try {
-            ObjectMapper mapper = new ObjectMapper();
+            ClassPathResource resource = new ClassPathResource(classpathLocation);
 
-            ClassPathResource res = new ClassPathResource(classpathLocation);
-            if (!res.exists()) {
-                throw new IllegalStateException("Arquivo não encontrado no classpath: " + classpathLocation);
+            if (!resource.exists()) {
+                throw new IllegalStateException(
+                        "File not found in classpath: " + classpathLocation);
             }
 
-            try (InputStream in = res.getInputStream()) {
+            try (InputStream in = resource.getInputStream()) {
                 JsonNode root = mapper.readTree(in);
-
-                JsonNode profilesNode = root.get("profiles");
-                if (profilesNode == null || !profilesNode.isArray() || profilesNode.isEmpty()) {
-                    throw new IllegalStateException("strategies.json inválido: 'profiles' vazio ou ausente");
-                }
-
-                List<StrategiesProfile> list = new ArrayList<>();
-                Set<String> uniqueKeys = new HashSet<>();
-
-                for (JsonNode pNode : profilesNode) {
-                    StrategiesProfile p = new StrategiesProfile();
-
-                    String symbol = requiredText(pNode, "symbol");
-                    int gran = requiredInt(pNode, "granularitySeconds");
-
-                    p.setSymbol(symbol);
-                    p.setGranularitySeconds(gran);
-
-                    p.setEngine(toMap(mapper, pNode.get("engine")));
-
-                    // NEW: trade config (optional)
-                    p.setTrade(readTradeConfig(mapper, pNode.get("trade")));
-
-                    JsonNode strategiesNode = pNode.get("strategies");
-                    if (strategiesNode == null || !strategiesNode.isObject()) {
-                        throw new IllegalStateException("Profile inválido (symbol=" + symbol + "): strategies ausente");
-                    }
-
-                    Map<String, Map<String, Object>> strategies = new HashMap<>();
-                    Iterator<Map.Entry<String, JsonNode>> it = strategiesNode.fields();
-                    while (it.hasNext()) {
-                        Map.Entry<String, JsonNode> entry = it.next();
-                        String strategyName = entry.getKey();
-                        JsonNode cfgNode = entry.getValue();
-                        if (cfgNode == null || !cfgNode.isObject()) continue;
-
-                        strategies.put(strategyName, toMap(mapper, cfgNode));
-                    }
-
-                    p.setStrategies(strategies);
-
-                    validate(p);
-
-                    String key = p.getSymbol() + "_" + p.getGranularitySeconds();
-                    if (!uniqueKeys.add(key)) {
-                        throw new IllegalStateException("Profile duplicado no strategies.json para: " + key);
-                    }
-
-                    list.add(p);
-                }
-
-                list.sort(Comparator.comparing(StrategiesProfile::getSymbol)
-                        .thenComparingInt(StrategiesProfile::getGranularitySeconds));
-
-                return List.copyOf(list);
+                return profileParser.parse(root, mapper);
             }
+
         } catch (Exception e) {
-            throw new IllegalStateException("Falha ao carregar " + classpathLocation, e);
+            throw new IllegalStateException(
+                    "Failed to load " + classpathLocation, e);
         }
     }
 
-    private static TradeConfig readTradeConfig(ObjectMapper mapper, JsonNode tradeNode) {
-        // Default: trade disabled
-        if (tradeNode == null || tradeNode.isNull() || !tradeNode.isObject()) {
-            return new TradeConfig();
-        }
-        TradeConfig cfg = mapper.convertValue(tradeNode, TradeConfig.class);
-        if (cfg == null) cfg = new TradeConfig();
-        return cfg;
-    }
-
-    private static void validate(StrategiesProfile p) {
-        if (p.getSymbol() == null || p.getSymbol().isBlank()) {
-            throw new IllegalStateException("Profile inválido: symbol vazio");
-        }
-        if (p.getGranularitySeconds() <= 0) {
-            throw new IllegalStateException("Profile inválido: granularitySeconds <= 0 para symbol=" + p.getSymbol());
-        }
-        if (p.getStrategies() == null || p.getStrategies().isEmpty()) {
-            throw new IllegalStateException("Profile inválido: strategies vazio para symbol=" + p.getSymbol());
-        }
-
-        // NEW: validate trade config
-        TradeConfig t = p.getTrade();
-        if (t == null) {
-            p.setTrade(new TradeConfig());
-            return;
-        }
-
-        if (t.isEnabled()) {
-            if (!(t.getAmount() > 0.0)) {
-                throw new IllegalStateException("Trade inválido: amount must be > 0 para symbol=" + p.getSymbol());
-            }
-            if (t.getCurrency() == null || t.getCurrency().isBlank()) {
-                throw new IllegalStateException("Trade inválido: currency vazia para symbol=" + p.getSymbol());
-            }
-            if (t.getDuration() < 1) {
-                throw new IllegalStateException("Trade inválido: duration < 1 para symbol=" + p.getSymbol());
-            }
-            String unit = (t.getDurationUnit() == null) ? "" : t.getDurationUnit().trim();
-            if (!unit.equals("m") && !unit.equals("s") && !unit.equals("h") && !unit.equals("d")) {
-                throw new IllegalStateException("Trade inválido: durationUnit deve ser um de [s,m,h,d] para symbol=" + p.getSymbol());
-            }
+    private List<StrategiesProfile> loadFromFilesystem(Path path) {
+        try {
+            String json = Files.readString(path);
+            JsonNode root = mapper.readTree(json);
+            return profileParser.parse(root, mapper);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to load file " + path, e);
         }
     }
 
-    private static String requiredText(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        if (v == null || v.isNull() || !v.isTextual() || v.asText().isBlank()) {
-            throw new IllegalStateException("Campo obrigatório inválido: " + field);
+    private boolean isValidFilesystemPath(String path) {
+        if (path == null || path.isBlank()) return false;
+        try {
+            return Files.exists(Path.of(path));
+        } catch (Exception ignored) {
+            return false;
         }
-        return v.asText();
-    }
-
-    private static int requiredInt(JsonNode node, String field) {
-        JsonNode v = node.get(field);
-        if (v == null || v.isNull() || !v.canConvertToInt()) {
-            throw new IllegalStateException("Campo obrigatório inválido: " + field);
-        }
-        return v.asInt();
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> toMap(ObjectMapper mapper, JsonNode node) {
-        if (node == null || node.isNull()) return Map.of();
-        if (!node.isObject()) return Map.of();
-        return mapper.convertValue(node, Map.class);
     }
 }

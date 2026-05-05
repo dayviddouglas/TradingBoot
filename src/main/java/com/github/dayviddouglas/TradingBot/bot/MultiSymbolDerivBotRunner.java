@@ -1,264 +1,203 @@
 package com.github.dayviddouglas.TradingBot.bot;
-import com.github.dayviddouglas.TradingBot.config.DerivProperties;
+
 import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivTradeService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivWsClient;
 import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
-import com.github.dayviddouglas.TradingBot.market.TickCandleAggregator;
 import com.github.dayviddouglas.TradingBot.model.Bar;
-import com.github.dayviddouglas.TradingBot.strategy.*;
+import com.github.dayviddouglas.TradingBot.model.Signal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.stereotype.Service;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.stereotype.Component;
 
-import java.net.URI;
-import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-@Service
-public class MultiSymbolDerivBotRunner implements ApplicationRunner {
-    private static final Logger log = LoggerFactory.getLogger(MultiSymbolDerivBotRunner.class);
+/**
+ * Orquestrador principal do bot em tempo real.
+ *
+ * Correção v5.3:
+ * O fluxo de inicialização foi simplificado. Com o novo modelo OTP
+ * da Deriv, a autenticação acontece antes da conexão WebSocket ser
+ * estabelecida. Quando onConnected é disparado, o bot já está
+ * autenticado e pode operar diretamente — sem etapa de authorize.
+ *
+ * Fluxo atualizado:
+ * 1. Carrega profiles do strategies.json
+ * 2. Constrói pipelines via PipelineRegistry
+ * 3. Registra callbacks de mercado
+ * 4. Registra callbacks de conexão
+ * 5. Conecta WebSocket (OTP obtido automaticamente pelo DerivWsClient)
+ * 6. Aguarda indefinidamente
+ */
+@Component
+public class MultiSymbolDerivBotRunner implements CommandLineRunner {
 
-    private final DerivProperties derivProps;
+    private static final Logger log =
+            LoggerFactory.getLogger(MultiSymbolDerivBotRunner.class);
+
     private final StrategiesConfigLoader strategiesLoader;
-    private final DerivTradeService tradeService;
+    private final DerivWsClient          derivWsClient;
+    private final DerivMarketDataService marketDataService;
+    private final DerivTradeService      tradeService;
+    private final PipelineRegistry       pipelineRegistry;
+    private final BotInitializer         botInitializer;
 
-    // injected beans (Option A)
-    private final DerivWsClient ws;
-    private final DerivMarketDataService md;
+    private final AtomicBoolean initialized = new AtomicBoolean(false);
 
-    public MultiSymbolDerivBotRunner(DerivProperties derivProps,
-                                     StrategiesConfigLoader strategiesLoader,
-                                     DerivTradeService tradeService,
-                                     DerivWsClient ws,
-                                     DerivMarketDataService md) {
-        this.derivProps = derivProps;
+    public MultiSymbolDerivBotRunner(
+            StrategiesConfigLoader strategiesLoader,
+            DerivWsClient derivWsClient,
+            DerivMarketDataService marketDataService,
+            DerivTradeService tradeService,
+            PipelineRegistry pipelineRegistry,
+            BotInitializer botInitializer
+    ) {
         this.strategiesLoader = strategiesLoader;
-        this.tradeService = tradeService;
-        this.ws = ws;
-        this.md = md;
+        this.derivWsClient    = derivWsClient;
+        this.marketDataService = marketDataService;
+        this.tradeService     = tradeService;
+        this.pipelineRegistry = pipelineRegistry;
+        this.botInitializer   = botInitializer;
     }
 
-    private record HistoryRoute(String symbol, int granularitySeconds, String engineKey) {}
+    // ═══════════════════════════════════════════════════════════════
+    // CommandLineRunner: ponto de entrada
+    // ═══════════════════════════════════════════════════════════════
 
     @Override
-    public void run(ApplicationArguments args) throws Exception {
-        List<StrategiesProfile> profiles = strategiesLoader.getProfiles();
-        if (profiles.isEmpty()) throw new IllegalStateException("Nenhum profile encontrado em configs/strategies.json");
+    public void run(String... args) throws Exception {
+        List<StrategiesProfile> profiles =
+                strategiesLoader.getProfiles();
 
-        log.info("Starting bot (profiles from strategies.json). appId={} profiles={}",
-                derivProps.getAppId(), profiles.size());
-
-        // Key by (symbol + granularity)
-        Map<String, StrategyEngine> engines = new HashMap<>();
-        Map<String, TickCandleAggregator> aggregators = new HashMap<>();
-
-        // req_id -> routing context (symbol/gran/engineKey)
-        Map<Long, HistoryRoute> historyReqRoutes = new ConcurrentHashMap<>();
-
-        // Enable temporarily to capture raw proposal_open_contract stream JSON
-        // IMPORTANT: set to false after diagnostics (it can be very noisy)
-        md.setLogRawProposalOpenContract(false);
-
-        // History callback routed by req_id
-        md.onCandleHistory((reqId, bars) -> {
-            HistoryRoute route = historyReqRoutes.remove(reqId);
-            if (route == null) {
-                log.debug("History received but no routing found for req_id={} (ignored). bars={}", reqId, bars.size());
-                return;
-            }
-
-            StrategyEngine engine = engines.get(route.engineKey());
-            if (engine == null) {
-                log.warn("History routing found but engine missing. req_id={} symbol={} granularity={} engineKey={}",
-                        reqId, route.symbol(), route.granularitySeconds(), route.engineKey());
-                return;
-            }
-
-            engine.seedHistory(bars);
-
-            log.info("History seeded | req_id={} | symbol={} | granularity={} | engineKey={} | bars={}",
-                    reqId, route.symbol(), route.granularitySeconds(), route.engineKey(), bars.size());
-        });
-
-        // Build engines + aggregators
-        for (StrategiesProfile p : profiles) {
-            String symbol = p.getSymbol();
-            int gran = p.getGranularitySeconds();
-            String key = key(symbol, gran);
-
-            int maxBars = getInt(p.getEngine(), "maxBars", 500);
-            List<TradingStrategy> strategies = buildStrategiesFromProfile(p);
-
-            StrategyEngine engine = new StrategyEngine(symbol, maxBars, strategies);
-
-            // connect final signal -> trade service
-            engine.onFinalSignal(sig -> tradeService.onFinalSignal(p, sig));
-
-            engines.put(key, engine);
-
-            TickCandleAggregator agg = new TickCandleAggregator(
-                    gran,
-                    engine::onBar
-            );
-            aggregators.put(key, agg);
-
-            log.info("Profile loaded: symbol={} granularitySeconds={} maxBars={} strategies={} tradeEnabled={}",
-                    symbol, gran, maxBars, strategies.size(), p.getTrade() != null && p.getTrade().isEnabled());
+        if (profiles.isEmpty()) {
+            log.error("No profiles loaded from strategies.json. Aborting.");
+            return;
         }
 
-        // Tick routing by symbol -> all aggregators for that symbol
-        md.onTick((symbol, epoch, quote) -> {
-            for (StrategiesProfile p : profiles) {
-                if (!p.getSymbol().equals(symbol)) continue;
+        log.info("BOT STARTING | profiles={}", profiles.size());
 
-                String k = key(symbol, p.getGranularitySeconds());
-                TickCandleAggregator agg = aggregators.get(k);
-                if (agg != null) agg.onTick(epoch, quote);
-            }
-        });
+        pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
 
-        // Unique symbols
-        Set<String> uniqueSymbols = new HashSet<>();
-        for (StrategiesProfile p : profiles) uniqueSymbols.add(p.getSymbol());
+        if (pipelineRegistry.size() == 0) {
+            log.error("No valid pipelines built. Aborting.");
+            return;
+        }
 
-        // prevent overlapping bootstraps (in case of reconnect storms)
-        AtomicBoolean bootstrapping = new AtomicBoolean(false);
+        registerMarketCallbacks();
+        registerConnectionCallbacks();
 
-        Runnable bootstrap = () -> {
-            if (!bootstrapping.compareAndSet(false, true)) return;
+        log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
 
-            try {
-                // authorize (timeout increased to reduce false fail-fast)
-                md.authorizeAndWaitFailFast(derivProps.getToken(), Duration.ofSeconds(30));
+        // OTP é obtido automaticamente pelo DerivWsClient
+        // via uriSupplier antes de conectar
+        derivWsClient.connect();
 
-                // seed history best-effort (req_id -> engineKey)
-                for (StrategiesProfile p : profiles) {
-                    String symbol = p.getSymbol();
-                    int gran = p.getGranularitySeconds();
-                    String engineKey = key(symbol, gran);
-
-                    long reqId = md.fetchCandleHistory(symbol, gran, derivProps.getHistoryCount());
-                    historyReqRoutes.put(reqId, new HistoryRoute(symbol, gran, engineKey));
-
-                    log.info("History requested | req_id={} | symbol={} | granularity={} | engineKey={}",
-                            reqId, symbol, gran, engineKey);
-                }
-
-                // subscribe ticks (needed after reconnect too)
-                for (String symbol : uniqueSymbols) {
-                    log.info("Subscribing ticks for symbol={}", symbol);
-                    md.subscribeTicks(symbol);
-                }
-
-                log.info("Bootstrap OK (authorize + history + subscriptions). symbols={} profiles={}",
-                        uniqueSymbols.size(), profiles.size());
-
-            } catch (Exception e) {
-                log.warn("Bootstrap failed: {}", e.getMessage(), e);
-            } finally {
-                bootstrapping.set(false);
-            }
-        };
-
-        // Hook lifecycle in WS client (bootstrap runs onOpen)
-        ws.setOnConnected(bootstrap);
-        ws.setOnDisconnected(evt -> log.warn("WS disconnected (event) code={} remote={} reason={}",
-                evt.code(), evt.remote(), evt.reason()));
-
-        // Connect first time
-        ws.connectBlocking(10, TimeUnit.SECONDS);
-
-        log.info("Bot is running with {} symbols and {} profiles. Press Ctrl+C to stop.",
-                uniqueSymbols.size(), profiles.size());
+        log.info("BOT RUNNING | Press Ctrl+C to stop.");
 
         Thread.currentThread().join();
     }
 
-    private static String key(String symbol, int granularitySeconds) {
-        return symbol + "_" + granularitySeconds;
+    // ═══════════════════════════════════════════════════════════════
+    // Callbacks de conexão
+    // ═══════════════════════════════════════════════════════════════
+
+    private void registerConnectionCallbacks() {
+        derivWsClient.setOnConnected(() -> {
+            try {
+                initializeAfterConnection();
+            } catch (Exception e) {
+                log.error("INITIALIZATION FAILED | error={}",
+                        e.getMessage(), e);
+            }
+        });
+
+        derivWsClient.setOnDisconnected(event ->
+                log.warn("WS DISCONNECTED | code={} | remote={} | reason={}",
+                        event.code(), event.remote(), event.reason()));
     }
 
-    private static int getInt(Map<String, Object> map, String key, int defaultValue) {
-        if (map == null) return defaultValue;
-        Object v = map.get(key);
-        if (v instanceof Integer i) return i;
-        if (v instanceof Number n) return n.intValue();
-        if (v instanceof String s) {
-            try { return Integer.parseInt(s.trim()); } catch (Exception ignored) {}
+    /**
+     * Executado após conexão WebSocket bem-sucedida.
+     *
+     * Correção v5.3: não há mais etapa de authorize — o bot já está
+     * autenticado via OTP embutido na URL de conexão.
+     * O initialized.compareAndSet evita dupla inicialização em
+     * reconexões rápidas.
+     */
+    private void initializeAfterConnection() {
+        if (!initialized.compareAndSet(false, true)) {
+            log.debug("Already initialized, skipping...");
+            return;
         }
-        return defaultValue;
+
+        log.info("WS CONNECTED | initializing pipelines...");
+        botInitializer.initialize(pipelineRegistry.getAll());
     }
 
-    private static double getDouble(Map<String, Object> map, String key, double defaultValue) {
-        if (map == null) return defaultValue;
-        Object v = map.get(key);
-        if (v instanceof Double d) return d;
-        if (v instanceof Number n) return n.doubleValue();
-        if (v instanceof String s) {
-            try { return Double.parseDouble(s.trim()); } catch (Exception ignored) {}
-        }
-        return defaultValue;
+    // ═══════════════════════════════════════════════════════════════
+    // Callbacks de mercado
+    // ═══════════════════════════════════════════════════════════════
+
+    private void registerMarketCallbacks() {
+        marketDataService.onTick(this::handleTick);
+        marketDataService.onCandleHistory(this::handleCandleHistory);
     }
 
-    private static boolean getBool(Map<String, Object> map, String key, boolean defaultValue) {
-        if (map == null) return defaultValue;
-        Object v = map.get(key);
-        if (v instanceof Boolean b) return b;
-        if (v instanceof String s) return Boolean.parseBoolean(s.trim());
-        return defaultValue;
+    private void handleTick(String symbol, long epoch, double quote) {
+        if (isInvalidTick(symbol, epoch, quote)) return;
+
+        pipelineRegistry.get(symbol).ifPresent(pipeline ->
+                pipeline.aggregator().onTick(epoch, quote));
     }
 
-    private List<TradingStrategy> buildStrategiesFromProfile(StrategiesProfile p) {
-        Map<String, Map<String, Object>> s = p.getStrategies();
-        if (s == null) throw new IllegalStateException("Profile sem strategies: symbol=" + p.getSymbol());
+    private void handleCandleHistory(Long reqId, List<Bar> bars) {
+        String symbol = botInitializer.resolveHistorySymbol(reqId);
 
-        List<TradingStrategy> list = new ArrayList<>();
-
-        Map<String, Object> emaRsi = s.get("emaRsi");
-        if (getBool(emaRsi, "enabled", false)) {
-            int emaFast = getInt(emaRsi, "emaFast", 12);
-            int emaSlow = getInt(emaRsi, "emaSlow", 26);
-            int rsiPeriod = getInt(emaRsi, "rsiPeriod", 14);
-            double rsiBuy = getDouble(emaRsi, "rsiBuyThreshold", 55.0);
-            double rsiSell = getDouble(emaRsi, "rsiSellThreshold", 45.0);
-            list.add(new EmaRsiStrategy(emaFast, emaSlow, rsiPeriod, rsiBuy, rsiSell));
+        if (symbol == null) {
+            log.debug("HISTORY RECEIVED | unknown req_id={}", reqId);
+            return;
         }
 
-        Map<String, Object> sr = s.get("supportResistance");
-        if (getBool(sr, "enabled", false)) {
-            int lookback = getInt(sr, "lookback", 50);
-            double tol = getDouble(sr, "tolerancePct", 0.001);
-            list.add(new SupportResistanceStrategy(lookback, tol));
-        }
+        pipelineRegistry.get(symbol).ifPresent(pipeline -> {
+            pipeline.engine().seedHistory(bars);
+            log.info("HISTORY SEEDED | symbol={} | bars={}",
+                    symbol, bars.size());
+        });
+    }
 
-        Map<String, Object> pin = s.get("pinBar");
-        if (getBool(pin, "enabled", false)) {
-            double wickToBody = getDouble(pin, "wickToBodyRatio", 2.5);
-            double maxOpp = getDouble(pin, "maxOppositeWickToBody", 0.7);
-            int srLookback = getInt(pin, "srLookback", 50);
-            double tol = getDouble(pin, "tolerancePct", 0.001);
-            list.add(new PinBarStrategy(wickToBody, maxOpp, srLookback, tol));
-        }
+    private boolean isInvalidTick(
+            String symbol, long epoch, double quote
+    ) {
+        return symbol == null
+                || symbol.isBlank()
+                || epoch <= 0
+                || !Double.isFinite(quote);
+    }
 
-        Map<String, Object> br = s.get("breakout");
-        if (getBool(br, "enabled", false)) {
-            int lookback = getInt(br, "lookback", 20);
-            double buffer = getDouble(br, "bufferPct", 0.0005);
-            list.add(new BreakoutStrategy(lookback, buffer));
-        }
+    // ═══════════════════════════════════════════════════════════════
+    // Tratamento de sinal final
+    // ═══════════════════════════════════════════════════════════════
 
-        if (list.isEmpty()) {
-            throw new IllegalStateException("Nenhuma estratégia habilitada no profile: symbol=" + p.getSymbol());
-        }
+    private void handleFinalSignal(
+            StrategiesProfile profile,
+            StrategyEngine engine,
+            Signal signal
+    ) {
+        log.info("FINAL SIGNAL | symbol={} | type={} | price={} "
+                        + "| strategy={} | decisionMode={} | time={}",
+                profile.getSymbol(),
+                signal.getType(),
+                signal.getPrice(),
+                signal.getStrategy(),
+                profile.getDecisionMode(),
+                signal.getTimestamp());
 
-        return List.copyOf(list);
+        List<Bar> recentBars = engine.getBarsSnapshot();
+        tradeService.onFinalSignal(profile, signal, recentBars);
     }
 }

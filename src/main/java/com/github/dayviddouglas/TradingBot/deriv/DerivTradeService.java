@@ -1,295 +1,342 @@
 package com.github.dayviddouglas.TradingBot.deriv;
 
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.config.TradeConfig;
+import com.github.dayviddouglas.TradingBot.deriv.trade.*;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
+import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;
+import com.github.dayviddouglas.TradingBot.risk.AtrRiskDecision;
+import com.github.dayviddouglas.TradingBot.risk.AtrRiskManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
 
-import java.time.Duration;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.List;
+import java.util.concurrent.CompletionException;
 
+/**
+ * Orquestrador principal do ciclo de vida de um trade na plataforma Deriv.
+ *
+ * Responsabilidade única: coordenar os componentes especializados
+ * para transformar um sinal do StrategyEngine em um contrato executado.
+ *
+ * Fluxo orquestrado:
+ * 1. TradeValidator      → valida se pode operar
+ * 2. AtrRiskManager      → avalia risco e ajusta stake
+ * 3. TradeContextFactory → constrói o contexto da operação
+ * 4. TradeExecutor       → executa proposal → ROI check → buy
+ * 5. TradeStateRegistry  → registra contrato aberto
+ * 6. TradeMonitor        → monitora via stream + watchdog
+ * 7. TradeErrorHandler   → classifica e trata erros
+ *
+ * Correção v5.3:
+ * - Removidas todas as chamadas a ensureAuthorized() e AUTH_TIMEOUT.
+ *   Com o novo modelo OTP da Deriv, a sessão WebSocket já está
+ *   autenticada desde a conexão — não há estado de autorização
+ *   para verificar ou renovar em nenhum ponto do fluxo de trade.
+ * - checkTradeAvailability() não chama mais ensureAuthorized()
+ *   antes do proposal.
+ */
 @Service
 public class DerivTradeService {
-    private static final Logger log = LoggerFactory.getLogger(DerivTradeService.class);
 
-    private final DerivMarketDataService md;
+    private static final Logger log =
+            LoggerFactory.getLogger(DerivTradeService.class);
 
-    private enum State { IDLE, PENDING, OPEN }
+    private final DerivMarketDataService marketDataService;
+    private final AtrRiskManager         atrRiskManager;
+    private final TradeValidator         validator;
+    private final TradeContextFactory    contextFactory;
+    private final TradeExecutor          executor;
+    private final TradeMonitor           monitor;
+    private final TradeErrorHandler      errorHandler;
+    private final TradeStateRegistry     registry;
 
-    private static final class TradeState {
-        final String symbol;
-        volatile State state = State.IDLE;
-        volatile Long contractId;
-        volatile String subscriptionId; // from proposal_open_contract stream (if any)
-        TradeState(String symbol) { this.symbol = symbol; }
+    public DerivTradeService(
+            DerivMarketDataService marketDataService,
+            AtrRiskManager atrRiskManager,
+            TradeValidator validator,
+            TradeContextFactory contextFactory,
+            TradeExecutor executor,
+            TradeMonitor monitor,
+            TradeErrorHandler errorHandler,
+            TradeStateRegistry registry
+    ) {
+        this.marketDataService = marketDataService;
+        this.atrRiskManager    = atrRiskManager;
+        this.validator         = validator;
+        this.contextFactory    = contextFactory;
+        this.executor          = executor;
+        this.monitor           = monitor;
+        this.errorHandler      = errorHandler;
+        this.registry          = registry;
+
+        this.marketDataService.onOpenContract(monitor::handleStreamUpdate);
     }
 
-    private final Map<String, TradeState> statesBySymbol = new ConcurrentHashMap<>();
-    private final Map<Long, TradeState> statesByContractId = new ConcurrentHashMap<>();
-
-    private final Duration proposalTimeout = Duration.ofSeconds(12);
-    private final Duration buyTimeout = Duration.ofSeconds(12);
-
-    // NEW: watchdog tuning
-    private final Duration closeGrace = Duration.ofSeconds(75); // after expected expiry
-    private final int pollAttempts = 6;                         // attempts after grace
-    private final Duration pollInterval = Duration.ofSeconds(10);
-
-    public DerivTradeService(DerivMarketDataService md) {
-        this.md = md;
-
-        // keep this connected; if stream works, we close immediately on is_sold=1
-        this.md.onOpenContract(this::handleOpenContractUpdate);
-    }
-
-    public void onFinalSignal(StrategiesProfile profile, Signal finalSignal) {
-        if (profile == null || finalSignal == null) return;
-        if (finalSignal.getType() == Signal.Type.NONE) return;
-
-        TradeConfig trade = profile.getTrade();
-        if (trade == null || !trade.isEnabled()) return;
-
-        String symbol = profile.getSymbol();
-        TradeState st = statesBySymbol.computeIfAbsent(symbol, TradeState::new);
-
-        synchronized (st) {
-            if (st.state != State.IDLE) {
-                log.info("TRADE IGNORE (already {}) | symbol={} | signal={}", st.state, symbol, finalSignal.getType());
-                return;
-            }
-            st.state = State.PENDING;
-            st.contractId = null;
-            st.subscriptionId = null;
-        }
-
-        String contractType = mapToContractType(finalSignal.getType());
-        double amount = trade.getAmount();
-        String currency = trade.getCurrency();
-        int duration = trade.getDuration();
-        String durationUnit = trade.getDurationUnit();
-
-        log.info("TRADE START | symbol={} | signal={} -> contract_type={} | amount={} {} | duration={}{}",
-                symbol, finalSignal.getType(), contractType, amount, currency, duration, durationUnit);
-
-        Thread.startVirtualThread(() -> {
-            try {
-                executeTradeFlow(st, symbol, contractType, amount, currency, duration, durationUnit);
-            } catch (Exception e) {
-                log.warn("TRADE FAILED | symbol={} | reason={}", symbol, e.getMessage(), e);
-                resetToIdle(st);
-            }
-        });
-    }
-
-    private void executeTradeFlow(TradeState st,
-                                  String symbol,
-                                  String contractType,
-                                  double amount,
-                                  String currency,
-                                  int duration,
-                                  String durationUnit) {
-
-        // 1) proposal
-        JsonNode proposalMsg = md.requestProposal(symbol, contractType, amount, currency, duration, durationUnit)
-                .orTimeout(proposalTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .join();
-
-        JsonNode proposal = proposalMsg.get("proposal");
-        if (proposal == null || !proposal.isObject()) {
-            throw new IllegalStateException("Resposta proposal inválida: " + proposalMsg);
-        }
-
-        String proposalId = proposal.path("id").asText("");
-        double askPrice = proposal.path("ask_price").asDouble(Double.NaN);
-        if (proposalId.isBlank() || !Double.isFinite(askPrice)) {
-            throw new IllegalStateException("proposal sem id/ask_price: " + proposal);
-        }
-
-        log.info("TRADE PROPOSAL OK | symbol={} | contract_type={} | proposalId={} | askPrice={}",
-                symbol, contractType, proposalId, askPrice);
-
-        // 2) buy
-        JsonNode buyMsg = md.buy(proposalId, amount)
-                .orTimeout(buyTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .join();
-
-        JsonNode buy = buyMsg.get("buy");
-        if (buy == null || !buy.isObject()) {
-            throw new IllegalStateException("Resposta buy inválida: " + buyMsg);
-        }
-
-        long contractId = buy.path("contract_id").asLong(-1);
-        double buyPrice = buy.path("buy_price").asDouble(Double.NaN);
-        if (contractId <= 0) {
-            throw new IllegalStateException("buy sem contract_id: " + buy);
-        }
-
-        synchronized (st) {
-            st.contractId = contractId;
-            st.state = State.OPEN;
-        }
-        statesByContractId.put(contractId, st);
-
-        log.info("TRADE BUY OK | symbol={} | contract_id={} | buy_price={}",
-                symbol, contractId, Double.isFinite(buyPrice) ? buyPrice : null);
-
-        // 3) subscribe open contract (may or may not stream reliably)
-        JsonNode ack = md.subscribeOpenContract(contractId).join();
-        log.info("TRADE MONITOR SUBSCRIBED | symbol={} | contract_id={} | ack_msg_type={}",
-                symbol, contractId, ack.path("msg_type").asText(""));
-
-        // 4) WATCHDOG fallback: guarantee closure logging even if stream fails
-        startWatchdogPoll(st, contractId, duration, durationUnit);
-    }
-
-    private void startWatchdogPoll(TradeState st, long contractId, int duration, String durationUnit) {
-        Duration expected = toDuration(duration, durationUnit);
-        if (expected == null) {
-            // if unsupported unit (e.g., ticks), we can still do a generic fallback after some time
-            expected = Duration.ofMinutes(20);
-        }
-
-        Duration wait = expected.plus(closeGrace);
-
-        Thread.startVirtualThread(() -> {
-            try {
-                Thread.sleep(wait.toMillis());
-            } catch (InterruptedException ignored) {
-                return;
-            }
-
-            // if already closed by stream, exit
-            TradeState current = statesByContractId.get(contractId);
-            if (current == null) return;
-
-            // poll attempts
-            for (int i = 1; i <= pollAttempts; i++) {
-                // if closed by stream between polls
-                if (statesByContractId.get(contractId) == null) return;
-
-                try {
-                    JsonNode msg = md.getOpenContractOnce(contractId)
-                            .orTimeout(8, TimeUnit.SECONDS)
-                            .join();
-
-                    JsonNode poc = msg.get("proposal_open_contract");
-                    if (poc != null && poc.isObject()) {
-                        int isSold = poc.path("is_sold").asInt(0);
-                        if (isSold == 1) {
-                            // finalize using same handler logic
-                            handleClosedContractFromPoc(poc, msg);
-                            return;
-                        }
-                    }
-                } catch (Exception e) {
-                    // swallow and retry
-                    log.debug("WATCHDOG poll failed | contract_id={} attempt={} err={}",
-                            contractId, i, e.getMessage());
-                }
-
-                try {
-                    Thread.sleep(pollInterval.toMillis());
-                } catch (InterruptedException ignored) {
-                    return;
-                }
-            }
-
-            // give up (rare)
-            log.warn("WATCHDOG: contract did not close after polls | contract_id={} symbol={}",
-                    contractId, st.symbol);
-        });
-    }
-
-    private void handleOpenContractUpdate(JsonNode msg) {
-        try {
-            JsonNode poc = msg.get("proposal_open_contract");
-            if (poc == null || !poc.isObject()) return;
-
-            long contractId = poc.path("contract_id").asLong(-1);
-            if (contractId <= 0) return;
-
-            TradeState st = statesByContractId.get(contractId);
-            if (st == null) return; // not ours
-
-            // capture subscription id (if any)
-            String subscriptionId = msg.path("subscription").path("id").asText("");
-            if (!subscriptionId.isBlank()) st.subscriptionId = subscriptionId;
-
-            int isSold = poc.path("is_sold").asInt(0);
-            if (isSold != 1) return;
-
-            handleClosedContractFromPoc(poc, msg);
-
-        } catch (DerivErrorException e) {
-            log.warn("TRADE STREAM ERROR | message={}", e.getMessage(), e);
-        } catch (Exception e) {
-            log.warn("Failed to handle open contract update: {}", e.getMessage(), e);
-        }
-    }
-
-    private void handleClosedContractFromPoc(JsonNode poc, JsonNode fullMsg) {
-        long contractId = poc.path("contract_id").asLong(-1);
-        if (contractId <= 0) return;
-
-        TradeState st = statesByContractId.get(contractId);
-        if (st == null) return;
-
-        double profit = poc.path("profit").asDouble(Double.NaN);
-        String result = (Double.isFinite(profit) && profit > 0) ? "WIN" : "LOSS";
-
-        log.info("TRADE CLOSED | symbol={} | contract_id={} | result={} | profit={}",
-                st.symbol, contractId, result, Double.isFinite(profit) ? profit : null);
-
-        // optional: stop subscription if we have it
-        String subscriptionId = st.subscriptionId;
-        if (subscriptionId == null || subscriptionId.isBlank()) {
-            subscriptionId = fullMsg.path("subscription").path("id").asText("");
-        }
-        if (subscriptionId != null && !subscriptionId.isBlank()) {
-            try {
-                md.forget(subscriptionId);
-            } catch (Exception ignored) {}
-        }
-
-        // cleanup
-        statesByContractId.remove(contractId);
-        resetToIdle(st);
-    }
-
-    private void resetToIdle(TradeState st) {
-        synchronized (st) {
-            st.state = State.IDLE;
-            st.contractId = null;
-            st.subscriptionId = null;
-        }
-    }
-
-    private static String mapToContractType(Signal.Type t) {
-        return switch (t) {
-            case BUY -> "CALL";
-            case SELL -> "PUT";
-            default -> throw new IllegalArgumentException("Cannot map signal type " + t);
-        };
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // Ponto de entrada principal
+    // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Convert Deriv duration to Java Duration for watchdog.
-     * Supports: s,m,h,d. (Ticks "t" not handled here.)
+     * Processa um sinal final emitido pelo StrategyEngine.
+     *
+     * Executa as validações iniciais na thread do WebSocket (rápido)
+     * e despacha a execução para uma virtual thread (I/O bound).
+     *
+     * @param profile    configuração do ativo
+     * @param signal     sinal final (BUY/SELL)
+     * @param recentBars barras recentes para avaliação de risco ATR
      */
-    private static Duration toDuration(int duration, String unit) {
-        if (unit == null) return null;
-        return switch (unit.trim()) {
-            case "s" -> Duration.ofSeconds(duration);
-            case "m" -> Duration.ofMinutes(duration);
-            case "h" -> Duration.ofHours(duration);
-            case "d" -> Duration.ofDays(duration);
-            default -> null;
-        };
+    public void onFinalSignal(
+            StrategiesProfile profile,
+            Signal signal,
+            List<Bar> recentBars
+    ) {
+        TradeState state = registry.getOrCreate(
+                profile != null ? profile.getSymbol() : null);
+
+        ValidationResult validation =
+                validator.validate(profile, signal, state);
+
+        if (!validation.shouldProceed()) return;
+
+        state.markPending();
+
+        AtrRiskDecision riskDecision =
+                evaluateRisk(profile, signal, recentBars);
+
+        if (!riskDecision.allowTrade()) {
+            logRiskBlock(profile.getSymbol(), riskDecision);
+            state.resetToIdle();
+            return;
+        }
+
+        logRiskResult(profile.getSymbol(), riskDecision);
+
+        TradeContext context = contextFactory.create(
+                profile, signal, riskDecision.adjustedAmount());
+
+        if (context.amount() <= 0.0) {
+            log.warn("TRADE SKIP | symbol={} | reason=stake invalid "
+                            + "after normalization",
+                    profile.getSymbol());
+            state.resetToIdle();
+            return;
+        }
+
+        state.applyContext(context);
+
+        logTradeStart(context);
+
+        Thread.startVirtualThread(() -> executeAsync(state, context));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Execução assíncrona
+    // ═══════════════════════════════════════════════════════════════
+
+    private void executeAsync(TradeState state, TradeContext context) {
+        try {
+            TradeExecutionResult result = executor.execute(context);
+
+            if (result.isSkippedByRoi()) {
+                state.resetToIdle();
+                return;
+            }
+
+            if (!result.isSuccess()) {
+                state.resetToIdle();
+                return;
+            }
+
+            long contractId = result.contractId();
+            state.markOpen(contractId);
+            registry.registerContract(contractId, state);
+
+            monitor.startMonitoring(state, context);
+
+        } catch (Exception e) {
+            String errorMessage = extractErrorMessage(e);
+            errorHandler.handle(state, errorMessage, e);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Avaliação de risco
+    // ═══════════════════════════════════════════════════════════════
+
+    private AtrRiskDecision evaluateRisk(
+            StrategiesProfile profile,
+            Signal signal,
+            List<Bar> recentBars
+    ) {
+        List<String> decisionStrategies =
+                extractDecisionStrategies(signal);
+
+        return atrRiskManager.evaluate(
+                profile.getSymbol(),
+                recentBars,
+                profile.getTrade().getAmount(),
+                decisionStrategies
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> extractDecisionStrategies(Signal signal) {
+        if (signal.getMetadata() == null) return List.of();
+
+        Object raw = signal.getMetadata().get("decisionStrategies");
+        if (raw instanceof List<?> list) {
+            return list.stream()
+                    .filter(java.util.Objects::nonNull)
+                    .map(Object::toString)
+                    .toList();
+        }
+
+        return List.of();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Validação de disponibilidade (bootstrap)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Verifica se um ativo suporta o tipo de contrato e parâmetros
+     * configurados. Usado pelo BotInitializer durante o bootstrap.
+     *
+     * Correção v5.3:
+     * Removida a chamada a ensureAuthorized() que existia antes do
+     * proposal. Com o modelo OTP, a sessão já está autenticada desde
+     * a conexão WebSocket.
+     *
+     * @param symbol       símbolo do ativo
+     * @param contractType tipo de contrato (CALL ou PUT)
+     * @param amount       valor do stake
+     * @param currency     moeda
+     * @param duration     duração do contrato
+     * @param durationUnit unidade de duração
+     * @return true se o ativo suporta os parâmetros
+     */
+    public boolean checkTradeAvailability(
+            String symbol,
+            String contractType,
+            double amount,
+            String currency,
+            int duration,
+            String durationUnit
+    ) {
+        try {
+            var proposalMsg = marketDataService
+                    .requestProposal(
+                            symbol,
+                            contractType,
+                            amount,
+                            currency,
+                            duration,
+                            durationUnit)
+                    .orTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .join();
+
+            var proposal = proposalMsg.get("proposal");
+            return proposal != null
+                    && proposal.isObject()
+                    && !proposal.path("id").asText("").isBlank();
+
+        } catch (Exception e) {
+            logAvailabilityCheckFailure(
+                    symbol, contractType, duration, durationUnit, e);
+            return false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Logs
+    // ═══════════════════════════════════════════════════════════════
+
+    private void logRiskBlock(String symbol, AtrRiskDecision risk) {
+        log.info("ATR RISK BLOCK | symbol={} | type={} | atrFast={} "
+                        + "| atrBaseline={} | atrRatio={} | reason={}",
+                symbol,
+                risk.confluenceType(),
+                risk.atrFast(),
+                risk.atrBaseline(),
+                risk.atrRatio(),
+                risk.reason());
+    }
+
+    private void logRiskResult(String symbol, AtrRiskDecision risk) {
+        if (risk.isStakeReduced()) {
+            log.info("ATR RISK REDUCE | symbol={} | type={} | atrRatio={} "
+                            + "| amount={} | reason={}",
+                    symbol,
+                    risk.confluenceType(),
+                    risk.atrRatio(),
+                    risk.adjustedAmount(),
+                    risk.reason());
+        } else {
+            log.info("ATR RISK OK | symbol={} | type={} | atrRatio={} "
+                            + "| amount={} | reason={}",
+                    symbol,
+                    risk.confluenceType(),
+                    risk.atrRatio(),
+                    risk.adjustedAmount(),
+                    risk.reason());
+        }
+    }
+
+    private void logTradeStart(TradeContext context) {
+        log.info("TRADE START | symbol={} | signal={} | contractType={} "
+                        + "| amount={} {} | duration={}{}",
+                context.symbol(),
+                context.signalType(),
+                context.contractType(),
+                context.amount(),
+                context.currency(),
+                context.duration(),
+                context.durationUnit());
+    }
+
+    private void logAvailabilityCheckFailure(
+            String symbol,
+            String contractType,
+            int duration,
+            String durationUnit,
+            Exception e
+    ) {
+        Throwable cause =
+                (e instanceof CompletionException && e.getCause() != null)
+                        ? e.getCause() : e;
+
+        if (cause instanceof DerivErrorException derr) {
+            log.warn("TRADE AVAILABILITY CHECK FAILED | symbol={} "
+                            + "| contractType={} | duration={}{} | reason={}",
+                    symbol, contractType,
+                    duration, durationUnit,
+                    derr.getMessage());
+        } else {
+            log.warn("TRADE AVAILABILITY CHECK ERROR | symbol={} "
+                            + "| contractType={} | duration={}{} | reason={}",
+                    symbol, contractType,
+                    duration, durationUnit,
+                    cause.getMessage());
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Utilitários
+    // ═══════════════════════════════════════════════════════════════
+
+    private String extractErrorMessage(Exception e) {
+        Throwable cause =
+                (e instanceof CompletionException && e.getCause() != null)
+                        ? e.getCause() : e;
+
+        if (cause instanceof DerivErrorException) {
+            return cause.getMessage().toLowerCase();
+        }
+
+        String msg = cause.getMessage();
+        return msg != null ? msg.toLowerCase() : "unknown error";
     }
 }

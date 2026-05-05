@@ -1,327 +1,331 @@
 package com.github.dayviddouglas.TradingBot.deriv;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.dayviddouglas.TradingBot.deriv.ws.DerivHistoryPaginator;
+import com.github.dayviddouglas.TradingBot.deriv.ws.DerivRequestSender;
+import com.github.dayviddouglas.TradingBot.deriv.ws.TickHandler;
+import com.github.dayviddouglas.TradingBot.deriv.ws.TickHeartbeat;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.time.Duration;
+
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+/**
+ * Camada de abstração da API Deriv sobre WebSocket.
+ *
+ * Correção v5.3:
+ * O fluxo de autorização foi removido desta classe. Com o novo modelo
+ * OTP da Deriv, a autenticação acontece na URL do WebSocket antes da
+ * conexão ser estabelecida. Não é mais necessário enviar mensagem
+ * de authorize após conectar.
+ *
+ * Responsabilidades mantidas:
+ * - Registrar handler de mensagens no DerivWsClient
+ * - Rotear mensagens por msg_type
+ * - Despachar callbacks de ticks e contratos abertos
+ * - Notificar TickHeartbeat a cada tick recebido
+ * - Parsear candles recebidos em objetos Bar
+ *
+ * Responsabilidades removidas:
+ * - authorize() — autenticação agora é via OTP na URL
+ * - authorizeAndWaitFailFast() — não mais necessário
+ * - ensureAuthorized() — não mais necessário
+ * - Estado de autorização (authorized, lastAuthorizedToken) — removidos
+ */
 public class DerivMarketDataService {
-    private static final Logger log = LoggerFactory.getLogger(DerivMarketDataService.class);
 
-    private final DerivWsClient ws;
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final AtomicLong reqIdSeq = new AtomicLong(1000);
+    private static final Logger log =
+            LoggerFactory.getLogger(DerivMarketDataService.class);
+
+    private final DerivWsClient wsClient;
+    private final DerivRequestSender requestSender;
+    private final DerivHistoryPaginator historyPaginator;
+    private final TickHeartbeat tickHeartbeat;
+    private final ObjectMapper mapper;
 
     private volatile TickHandler onTick;
     private volatile BiConsumer<Long, List<Bar>> onCandleHistory;
-
-    // streaming open contract updates (trade) - may be unreliable in your current environment
     private volatile Consumer<JsonNode> onOpenContract;
 
-    private final Map<Long, CompletableFuture<JsonNode>> pendingByReqId = new ConcurrentHashMap<>();
+    public DerivMarketDataService(
+            DerivWsClient wsClient,
+            DerivRequestSender requestSender,
+            DerivHistoryPaginator historyPaginator,
+            TickHeartbeat tickHeartbeat,
+            ObjectMapper mapper
+    ) {
+        this.wsClient          = wsClient;
+        this.requestSender     = requestSender;
+        this.historyPaginator  = historyPaginator;
+        this.tickHeartbeat     = tickHeartbeat;
+        this.mapper            = mapper;
 
-    // optional diagnostics
-    private volatile boolean logRawProposalOpenContract = false;
-
-    @FunctionalInterface
-    public interface TickHandler {
-        void onTick(String symbol, long epochSeconds, double quote);
+        this.wsClient.setMessageHandler(this::routeMessage);
+        this.wsClient.setOnDisconnected(evt ->
+                log.warn("WS DISCONNECTED | code={} | reason={}",
+                        evt.code(), evt.reason()));
     }
 
-    public DerivMarketDataService(DerivWsClient ws) {
-        this.ws = ws;
-        this.ws.setMessageHandler(this::onWsMessage);
+    // ═══════════════════════════════════════════════════════════════
+    // Registro de callbacks
+    // ═══════════════════════════════════════════════════════════════
+
+    public void onTick(TickHandler handler) {
+        this.onTick = handler;
     }
 
-    public void onTick(TickHandler handler) { this.onTick = handler; }
-
-    /** history callback routed by req_id */
-    public void onCandleHistory(BiConsumer<Long, List<Bar>> handler) { this.onCandleHistory = handler; }
-
-    public void onOpenContract(Consumer<JsonNode> handler) { this.onOpenContract = handler; }
-
-    public void setLogRawProposalOpenContract(boolean enabled) {
-        this.logRawProposalOpenContract = enabled;
+    public void onCandleHistory(BiConsumer<Long, List<Bar>> handler) {
+        this.onCandleHistory = handler;
     }
 
-    // ----------------------------
-    // Requests
-    // ----------------------------
-
-    public CompletableFuture<JsonNode> authorize(String token) {
-        long reqId = nextReqId();
-        ObjectNode payload = mapper.createObjectNode();
-        payload.put("authorize", token);
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+    public void onOpenContract(Consumer<JsonNode> handler) {
+        this.onOpenContract = handler;
     }
 
-    public void authorizeAndWaitFailFast(String token, Duration timeout) {
-        try {
-            authorize(token)
-                    .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
-                    .join();
-            log.info("Authorize OK");
-        } catch (Exception e) {
-            throw new IllegalStateException("Falha no authorize (token inválido/sem permissão/trade indisponível)", e);
-        }
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // Mercado
+    // ═══════════════════════════════════════════════════════════════
 
     public long subscribeTicks(String symbol) {
-        long reqId = nextReqId();
-        ObjectNode payload = mapper.createObjectNode();
+        ObjectNode payload = requestSender.newPayload();
         payload.put("ticks", symbol);
         payload.put("subscribe", 1);
-        payload.put("req_id", reqId);
-        ws.send(payload.toString());
-        log.info("Subscribed ticks symbol={} req_id={}", symbol, reqId);
+
+        long reqId = requestSender.sendFireAndForget(payload);
+        log.info("TICKS SUBSCRIBED | symbol={} | req_id={}",
+                symbol, reqId);
         return reqId;
     }
 
-    public long fetchCandleHistory(String symbol, int granularitySeconds, int count) {
-        long reqId = nextReqId();
-        ObjectNode payload = mapper.createObjectNode();
-        payload.put("ticks_history", symbol);
-        payload.put("adjust_start_time", 1);
-        payload.put("count", count);
-        payload.put("end", "latest");
-        payload.put("style", "candles");
-        payload.put("granularity", granularitySeconds);
-        payload.put("req_id", reqId);
-        ws.send(payload.toString());
-        log.info("Requested candle history symbol={} granularity={} count={} req_id={}",
-                symbol, granularitySeconds, count, reqId);
-        return reqId;
+    public long fetchCandleHistory(
+            String symbol,
+            int granularitySeconds,
+            int count
+    ) {
+        if (count <= 0) {
+            throw new IllegalArgumentException("count must be > 0");
+        }
+
+        return historyPaginator.request(
+                symbol,
+                granularitySeconds,
+                count,
+                this::dispatchCandleHistory
+        );
     }
 
-    // ---- TRADE requests ----
+    // ═══════════════════════════════════════════════════════════════
+    // Trade
+    // ═══════════════════════════════════════════════════════════════
 
-    public CompletableFuture<JsonNode> requestProposal(String symbol,
-                                                       String contractType,
-                                                       double amount,
-                                                       String currency,
-                                                       int duration,
-                                                       String durationUnit) {
-        long reqId = nextReqId();
-
-        ObjectNode payload = mapper.createObjectNode();
-        payload.put("proposal", 1);
-        payload.put("symbol", symbol);
-        payload.put("contract_type", contractType);
-        payload.put("amount", amount);
-        payload.put("basis", "stake");
-        payload.put("currency", currency);
-        payload.put("duration", duration);
-        payload.put("duration_unit", durationUnit);
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+    public CompletableFuture<JsonNode> requestProposal(
+            String symbol,
+            String contractType,
+            double amount,
+            String currency,
+            int duration,
+            String durationUnit
+    ) {
+        ObjectNode payload = requestSender.newPayload();
+        payload.put("proposal",         1);
+        payload.put("underlying_symbol", symbol);
+        payload.put("contract_type",    contractType);
+        payload.put("amount",           amount);
+        payload.put("basis",            "stake");
+        payload.put("currency",         currency);
+        payload.put("duration",         duration);
+        payload.put("duration_unit",    durationUnit);
+        return requestSender.send(payload);
     }
 
-    public CompletableFuture<JsonNode> buy(String proposalId, double price) {
-        long reqId = nextReqId();
-
-        ObjectNode payload = mapper.createObjectNode();
-        payload.put("buy", proposalId);
+    public CompletableFuture<JsonNode> buy(
+            String proposalId,
+            double price
+    ) {
+        ObjectNode payload = requestSender.newPayload();
+        payload.put("buy",   proposalId);
         payload.put("price", price);
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+        return requestSender.send(payload);
     }
 
-    public CompletableFuture<JsonNode> subscribeOpenContract(long contractId) {
-        long reqId = nextReqId();
-
-        ObjectNode payload = mapper.createObjectNode();
+    public CompletableFuture<JsonNode> subscribeOpenContract(
+            long contractId
+    ) {
+        ObjectNode payload = requestSender.newPayload();
         payload.put("proposal_open_contract", 1);
-        payload.put("contract_id", contractId);
-        payload.put("subscribe", 1);
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+        payload.put("contract_id",            contractId);
+        payload.put("subscribe",              1);
+        return requestSender.send(payload);
     }
 
-    /**
-     * NEW: One-shot query (poll) for an open/closed contract state.
-     * This is the fallback when streaming updates don't arrive.
-     */
-    public CompletableFuture<JsonNode> getOpenContractOnce(long contractId) {
-        long reqId = nextReqId();
-
-        ObjectNode payload = mapper.createObjectNode();
+    public CompletableFuture<JsonNode> getOpenContractOnce(
+            long contractId
+    ) {
+        ObjectNode payload = requestSender.newPayload();
         payload.put("proposal_open_contract", 1);
-        payload.put("contract_id", contractId);
-        // Do NOT set subscribe here (or explicitly subscribe=0)
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+        payload.put("contract_id",            contractId);
+        return requestSender.send(payload);
     }
 
-    /**
-     * Optional: stop a subscription.
-     */
     public CompletableFuture<JsonNode> forget(String subscriptionId) {
-        long reqId = nextReqId();
-
-        ObjectNode payload = mapper.createObjectNode();
+        ObjectNode payload = requestSender.newPayload();
         payload.put("forget", subscriptionId);
-        payload.put("req_id", reqId);
-
-        CompletableFuture<JsonNode> fut = register(reqId);
-        ws.send(payload.toString());
-        return fut;
+        return requestSender.send(payload);
     }
 
-    // ----------------------------
-    // WS routing
-    // ----------------------------
+    // ═══════════════════════════════════════════════════════════════
+    // Roteamento de mensagens
+    // ═══════════════════════════════════════════════════════════════
 
-    private void onWsMessage(String raw) {
+    private void routeMessage(String raw) {
         try {
             JsonNode msg = mapper.readTree(raw);
 
             if (msg.has("error")) {
-                handleDerivError(msg);
+                handleError(msg);
                 return;
             }
 
             String msgType = msg.path("msg_type").asText("");
+
             switch (msgType) {
-                case "tick" -> handleTick(msg);
-
-                // Deriv often returns msg_type="candles" for ticks_history(style=candles)
-                case "history", "candles" -> handleHistory(msg);
-
-                case "authorize", "proposal", "buy", "forget", "proposal_open_contract" -> {
-                    // complete one-shot futures (req_id bound)
-                    completeReq(msg);
-
-                    // stream contract updates
-                    if ("proposal_open_contract".equals(msgType)) {
-                        if (logRawProposalOpenContract) {
-                            log.info("RAW POC: {}", msg.toString());
-                        }
-                        Consumer<JsonNode> handler = onOpenContract;
-                        if (handler != null) handler.accept(msg);
-                    }
-                }
-
-                default -> { /* ignore */ }
+                case "tick"                   -> handleTick(msg);
+                case "history", "candles"     -> handleHistory(msg);
+                case "proposal_open_contract" -> handleOpenContract(msg);
+                case "proposal", "buy",
+                     "forget"                 -> requestSender.complete(msg);
+                default -> { /* ignorado silenciosamente */ }
             }
+
         } catch (Exception e) {
-            log.warn("Failed to handle WS message raw={}", raw, e);
+            log.warn("MESSAGE ROUTING ERROR | raw={}", raw, e);
         }
     }
 
-    private void handleDerivError(JsonNode msg) {
-        String errMessage = msg.path("error").path("message").asText("Deriv error");
-        long reqId = msg.path("req_id").asLong(-1);
+    // ═══════════════════════════════════════════════════════════════
+    // Handlers por tipo de mensagem
+    // ═══════════════════════════════════════════════════════════════
 
-        log.warn("Deriv error. req_id={} message={} full={}", reqId, errMessage, msg.toString());
+    private void handleError(JsonNode msg) {
+        String errMessage = msg.path("error").path("message")
+                .asText("Deriv error");
+        String errCode    = msg.path("error").path("code").asText("");
+        long   reqId      = msg.path("req_id").asLong(-1);
+
+        log.warn("DERIV API ERROR | req_id={} | code={} | message={}",
+                reqId, errCode, errMessage);
+
+        if (historyPaginator.isPaginatedPage(reqId)) {
+            historyPaginator.handlePageError(reqId);
+            return;
+        }
 
         if (reqId > 0) {
-            CompletableFuture<JsonNode> fut = pendingByReqId.remove(reqId);
-            if (fut != null) fut.completeExceptionally(new DerivErrorException(errMessage));
+            requestSender.completeExceptionally(
+                    reqId, new DerivErrorException(errMessage));
         }
     }
 
-    private void completeReq(JsonNode msg) {
-        long reqId = msg.path("req_id").asLong(-1);
-        if (reqId <= 0) return;
-
-        CompletableFuture<JsonNode> fut = pendingByReqId.get(reqId);
-        if (fut != null) fut.complete(msg);
-    }
-
+    /**
+     * Processa tick recebido e notifica o TickHeartbeat.
+     *
+     * tickHeartbeat.recordTick() é obrigatório para que o monitor
+     * de saúde da conexão funcione corretamente.
+     */
     private void handleTick(JsonNode msg) {
         JsonNode tick = msg.get("tick");
         if (tick == null || !tick.isObject()) return;
 
         String symbol = tick.path("symbol").asText("");
-        long epoch = tick.path("epoch").asLong(-1);
-        double quote = tick.path("quote").asDouble(Double.NaN);
+        long   epoch  = tick.path("epoch").asLong(-1);
+        double quote  = tick.path("quote").asDouble(Double.NaN);
+
+        if (symbol.isBlank() || epoch <= 0
+                || !Double.isFinite(quote)) return;
+
+        tickHeartbeat.recordTick();
 
         TickHandler handler = onTick;
-        if (handler != null && !symbol.isBlank() && epoch > 0 && Double.isFinite(quote)) {
-            handler.onTick(symbol, epoch, quote);
-        }
+        if (handler == null) return;
+
+        handler.onTick(symbol, epoch, quote);
     }
 
     private void handleHistory(JsonNode msg) {
         JsonNode candles = msg.get("candles");
         if (candles == null || !candles.isArray()) return;
 
+        List<Bar> bars  = parseBars(candles);
+        long      reqId = msg.path("req_id").asLong(-1);
+
+        historyPaginator.handlePage(reqId, bars);
+    }
+
+    private void handleOpenContract(JsonNode msg) {
+        requestSender.complete(msg);
+
+        Consumer<JsonNode> handler = onOpenContract;
+        if (handler != null) {
+            handler.accept(msg);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Parsing de candles
+    // ═══════════════════════════════════════════════════════════════
+
+    private List<Bar> parseBars(JsonNode candles) {
         List<Bar> bars = new ArrayList<>(candles.size());
-        for (JsonNode c : candles) {
-            Bar bar = toBar(c);
+
+        for (JsonNode node : candles) {
+            Bar bar = parseBar(node);
             if (bar != null) bars.add(bar);
         }
 
         bars.sort(Comparator.comparing(Bar::timestamp));
-
-        long reqId = msg.path("req_id").asLong(-1);
-        BiConsumer<Long, List<Bar>> handler = onCandleHistory;
-        if (handler != null) handler.accept(reqId, List.copyOf(bars));
+        return bars;
     }
 
-    private Bar toBar(JsonNode node) {
-        long epoch = node.path("epoch").asLong(-1);
+    private Bar parseBar(JsonNode node) {
+        long   epoch  = node.path("epoch").asLong(-1);
         if (epoch <= 0) return null;
 
-        double open = node.path("open").asDouble(Double.NaN);
-        double high = node.path("high").asDouble(Double.NaN);
-        double low = node.path("low").asDouble(Double.NaN);
-        double close = node.path("close").asDouble(Double.NaN);
+        double open   = node.path("open").asDouble(Double.NaN);
+        double high   = node.path("high").asDouble(Double.NaN);
+        double low    = node.path("low").asDouble(Double.NaN);
+        double close  = node.path("close").asDouble(Double.NaN);
         double volume = node.path("volume").asDouble(0.0);
 
-        if (!Double.isFinite(open) || !Double.isFinite(high) || !Double.isFinite(low) || !Double.isFinite(close)) {
+        if (!Double.isFinite(open)  || !Double.isFinite(high)
+                || !Double.isFinite(low)   || !Double.isFinite(close)) {
             return null;
         }
 
-        return new Bar(Instant.ofEpochSecond(epoch), open, high, low, close, volume);
+        return new Bar(
+                Instant.ofEpochSecond(epoch),
+                open, high, low, close, volume
+        );
     }
 
-    private long nextReqId() {
-        return reqIdSeq.getAndIncrement();
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // Utilitários
+    // ═══════════════════════════════════════════════════════════════
 
-    private CompletableFuture<JsonNode> register(long reqId) {
-        CompletableFuture<JsonNode> fut = new CompletableFuture<>();
-        pendingByReqId.put(reqId, fut);
-        fut.whenComplete((ok, err) -> pendingByReqId.remove(reqId)); // avoid memory leak
-        return fut;
-    }
-
-    @SuppressWarnings("unused")
-    private static List<String> sortedFieldNames(JsonNode node) {
-        if (node == null || !node.isObject()) return List.of();
-        List<String> names = new ArrayList<>();
-        Iterator<String> it = node.fieldNames();
-        while (it.hasNext()) names.add(it.next());
-        names.sort(String::compareTo);
-        return names;
+    private void dispatchCandleHistory(long reqId, List<Bar> bars) {
+        BiConsumer<Long, List<Bar>> handler = onCandleHistory;
+        if (handler != null) {
+            handler.accept(reqId, bars);
+        }
     }
 }
