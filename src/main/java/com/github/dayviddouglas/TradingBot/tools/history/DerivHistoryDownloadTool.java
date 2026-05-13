@@ -38,7 +38,7 @@ public class DerivHistoryDownloadTool {
      * Correção v5.3: substituiu APP_ID (int) + concatenação.
      */
     private static final String ENDPOINT =
-            "wss://ws.derivws.com/websockets/v3?app_id=1089";
+            "wss://api.derivws.com/trading/v1/options/ws/public";
 
     private static final List<String> SYMBOLS = List.of(
             "frxXAUUSD",
@@ -78,7 +78,7 @@ public class DerivHistoryDownloadTool {
     );
 
     private static final int GRANULARITY_SECONDS  = 60;
-    private static final int DAYS_BACK            = 90;
+    private static final int DAYS_BACK            = 10;
     private static final int COUNT_PER_REQUEST    = 1000;
     private static final int TIMEOUT_SECONDS      = 60;
     private static final int MAX_PAGES_PER_SYMBOL = 5000;

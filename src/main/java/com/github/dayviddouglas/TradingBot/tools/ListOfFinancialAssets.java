@@ -42,7 +42,7 @@ public class ListOfFinancialAssets {
      * Não requer OTP — usado apenas para dados públicos.
      */
     private static final String ENDPOINT =
-            "wss://ws.derivws.com/websockets/v3?app_id=1089";
+            "wss://api.derivws.com/trading/v1/options/ws/public";
 
     public static void main(String[] args) throws Exception {
 
@@ -59,6 +59,7 @@ public class ListOfFinancialAssets {
         try (DerivWsClient ws = new DerivWsClient(new URI(ENDPOINT))) {
 
             ws.setMessageHandler(raw -> {
+                log.info("RAW MESSAGE RECEIVED: {}", raw);
                 try {
                     JsonNode msg     = mapper.readTree(raw);
                     String   msgType = msg.path("msg_type").asText("");
@@ -107,36 +108,38 @@ public class ListOfFinancialAssets {
                             int reqId = 1;
 
                             for (JsonNode o : arr) {
-                                String symbol = o.path("symbol").asText("");
+                                // ANTES: o.path("symbol")
+                                String symbol = o.path("underlying_symbol").asText("");
                                 if (symbol.isBlank()) continue;
 
                                 ObjectNode item = mapper.createObjectNode();
-                                item.put("symbol",        symbol);
-                                item.put("name",          o.path("display_name").asText(""));
-                                item.put("market",        o.path("market").asText(""));
-                                item.put("submarket",     o.path("submarket").asText(""));
-                                item.put("marketDisplay", o.path("market_display_name").asText(""));
-                                item.put("submarketDisplay", o.path("submarket_display_name").asText(""));
-                                item.put("open",          o.path("exchange_is_open").asInt(0) == 1);
-                                item.put("suspended",     o.path("is_trading_suspended").asInt(0) == 1);
-                                item.put("pip",           o.path("pip").asDouble(0.0));
-                                item.put("symbolType",    o.path("symbol_type").asText(""));
+                                item.put("symbol", symbol);
+                                // ANTES: o.path("display_name")
+                                item.put("name", o.path("underlying_symbol_name").asText(""));
+                                item.put("market", o.path("market").asText(""));
+                                item.put("submarket", o.path("submarket").asText(""));
+                                // API não retorna display — use o próprio valor ou deixe vazio
+                                item.put("marketDisplay", o.path("market").asText(""));
+                                item.put("submarketDisplay", o.path("submarket").asText(""));
+                                item.put("open", o.path("exchange_is_open").asInt(0) == 1);
+                                item.put("suspended", o.path("is_trading_suspended").asInt(0) == 1);
+                                // ANTES: o.path("pip")
+                                item.put("pip", o.path("pip_size").asDouble(0.0));
+                                // ANTES: o.path("symbol_type")
+                                item.put("symbolType", o.path("underlying_symbol_type").asText(""));
                                 item.put("isTradingSuspended",
                                         o.path("is_trading_suspended").asInt(0) == 1);
                                 item.put("contractsAvailable", false);
-                                item.set("contractTypes",   mapper.createArrayNode());
-                                item.set("tradeFamilies",   mapper.createObjectNode());
+                                item.set("contractTypes", mapper.createArrayNode());
+                                item.set("tradeFamilies", mapper.createObjectNode());
                                 item.set("contractsReport", mapper.createArrayNode());
 
                                 assetsBySymbol.put(symbol, item);
 
-                                ObjectNode contractsPayload =
-                                        mapper.createObjectNode();
-                                contractsPayload.put("contracts_for",    symbol);
-                                contractsPayload.put("currency",         "USD");
-                                contractsPayload.put("landing_company",  "svg");
-                                contractsPayload.put("product_type",     "basic");
-                                contractsPayload.put("req_id",           reqId);
+                                // contracts_for também usa o símbolo correto agora
+                                ObjectNode contractsPayload = mapper.createObjectNode();
+                                contractsPayload.put("contracts_for", symbol);
+                                contractsPayload.put("req_id", reqId);
 
                                 reqIdToSymbol.put(reqId, symbol);
                                 pendingContracts.add(symbol);
@@ -278,10 +281,10 @@ public class ListOfFinancialAssets {
 
             ObjectNode payload = mapper.createObjectNode();
             payload.put("active_symbols", "brief");
-            payload.put("product_type",   "basic");
 
             log.info("Sending active_symbols request...");
             ws.send(payload.toString());
+
 
             if (!activeSymbolsLatch.await(15, TimeUnit.SECONDS)) {
                 log.warn("Timeout waiting for active_symbols response");
