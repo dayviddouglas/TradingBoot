@@ -638,7 +638,8 @@ O `app-id` é enviado no header `Deriv-App-ID` durante a autenticação REST via
 
 ### 7.2 Obter o Access Token
 
-O projeto precisa de um `access-token` para autenticar as chamadas REST.
+O projeto precisa de um `access-token` (Personal Access Token — PAT)
+para autenticar as chamadas REST que trocam o token por um OTP de sessão.
 
 #### Passo a passo
 
@@ -673,8 +674,12 @@ deriv:
 
 #### Observação técnica
 
-O `access-token` é enviado no header `Authorization: Bearer {accessToken}`.
+#### Observação técnica
 
+O `access-token` é um PAT enviado no header
+`Authorization: Bearer {accessToken}` para obter o OTP de sessão.
+Após a troca, o OTP é embutido na URL do WebSocket como query string.
+O token original não é enviado via WebSocket.
 ---
 
 ### 7.3 Obter o Account ID
@@ -903,10 +908,9 @@ TradingBot/
 │   ├── application.yml    NÃO versionado
 │   └── strategies.json    NÃO versionado
 │
-├── data/
+├├── data/
 │   ├── history/           histórico de candles
-│   ├── reports/           relatórios do runtime
-│   └── recovered/         relatórios recuperados
+│   └── reports/           relatórios do runtime
 │
 └── pom.xml
 ```
@@ -3060,10 +3064,6 @@ data/reports/
 ├── daily_summary_{date}.json
 └── regime_history_{symbol}_{date}.json
 
-data/recovered/
-├── trades_{date}.csv
-├── trades_{date}.json
-└── daily_summary_{date}.json
 ```
 
 <details>
@@ -3186,37 +3186,7 @@ data/history/frxEURUSD_60.json
 </details>
 
 <details>
-<summary><strong>16.2 Recuperação de trades</strong></summary>
-
-**Classe:** `TradeHistoryDownloadTool`
-
-```text
-src/main/java/.../tools/TradeHistoryDownloadTool.java
-```
-
-Argumentos:
-
-```bash
---days=7
---weeks=2
---months=1
---from=2026-04-01 --to=2026-04-30
-```
-
-**Gera:**
-
-```text
-data/recovered/trades_2026-04-29.csv
-data/recovered/trades_2026-04-29.json
-data/recovered/daily_summary_2026-04-29.json
-```
-
-> Requer autenticação OTP.
-
-</details>
-
-<details>
-<summary><strong>16.3 Listagem de ativos</strong></summary>
+<summary><strong>16.2 Listagem de ativos</strong></summary>
 
 **Classe:** `ListOfFinancialAssets`
 
@@ -3228,20 +3198,18 @@ data/active_symbols.full.json
 
 Contém: símbolos, contratos, famílias de trade, durações.
 
-> Usa endpoint público.
+> Usa endpoint público. Não requer autenticação.
 
 </details>
 
 <details>
-<summary><strong>16.4 Conversão para PDF</strong></summary>
+<summary><strong>16.3 Conversão para PDF</strong></summary>
 
 **Classe:** `HistoryJsonToPdfTool`
 
 Converte arquivos JSON de histórico em PDF para visualização.
 
 </details>
-
----
 
 ## 17. Backtest
 
