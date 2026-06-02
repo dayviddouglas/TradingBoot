@@ -121,6 +121,7 @@ public class TradeErrorHandler {
     }
 
     private void handleUnknownError(String symbol, String error, Exception cause) {
-        log.warn("TRADE FAILED | symbol={} | reason={}", symbol, error, cause);
+        String message = cause.getMessage();
+        log.warn("TRADE FAILED | symbol={} | reason={}", symbol, message);
     }
 }
