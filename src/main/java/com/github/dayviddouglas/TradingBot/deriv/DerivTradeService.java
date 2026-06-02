@@ -2,6 +2,8 @@ package com.github.dayviddouglas.TradingBot.deriv;
 
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.deriv.trade.*;
+import com.github.dayviddouglas.TradingBot.engine.MarketRegime;
+import com.github.dayviddouglas.TradingBot.engine.RegimeRegistry;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;
@@ -23,11 +25,12 @@ import java.util.concurrent.CompletionException;
  * Fluxo orquestrado:
  * 1. TradeValidator      → valida se pode operar
  * 2. AtrRiskManager      → avalia risco e ajusta stake
- * 3. TradeContextFactory → constrói o contexto da operação
- * 4. TradeExecutor       → executa proposal → ROI check → buy
- * 5. TradeStateRegistry  → registra contrato aberto
- * 6. TradeMonitor        → monitora via stream + watchdog
- * 7. TradeErrorHandler   → classifica e trata erros
+ * 3. RegimeRegistry      → consulta regime confirmado do ativo (v5)
+ * 4. TradeContextFactory → constrói o contexto da operação com regime
+ * 5. TradeExecutor       → executa proposal → ROI check → buy
+ * 6. TradeStateRegistry  → registra contrato aberto
+ * 7. TradeMonitor        → monitora via stream + watchdog
+ * 8. TradeErrorHandler   → classifica e trata erros
  *
  * Correção v5.3:
  * - Removidas todas as chamadas a ensureAuthorized() e AUTH_TIMEOUT.
@@ -36,6 +39,14 @@ import java.util.concurrent.CompletionException;
  *   para verificar ou renovar em nenhum ponto do fluxo de trade.
  * - checkTradeAvailability() não chama mais ensureAuthorized()
  *   antes do proposal.
+ *
+ * Correção v5.4.2 — bug de regime não registrado:
+ * - O RegimeRegistry foi injetado e passou a ser consultado em
+ *   onFinalSignal() antes da criação do TradeContext.
+ * - O regime confirmado é passado explicitamente para
+ *   contextFactory.create() via sobrecarga com confirmedRegime.
+ * - Antes, a sobrecarga sem regime era chamada, resultando em
+ *   regime vazio em todos os trades fora do modo CONFLUENCE.
  */
 @Service
 public class DerivTradeService {
@@ -51,6 +62,7 @@ public class DerivTradeService {
     private final TradeMonitor           monitor;
     private final TradeErrorHandler      errorHandler;
     private final TradeStateRegistry     registry;
+    private final RegimeRegistry         regimeRegistry;  // ← v5.4.2
 
     public DerivTradeService(
             DerivMarketDataService marketDataService,
@@ -60,7 +72,8 @@ public class DerivTradeService {
             TradeExecutor executor,
             TradeMonitor monitor,
             TradeErrorHandler errorHandler,
-            TradeStateRegistry registry
+            TradeStateRegistry registry,
+            RegimeRegistry regimeRegistry            // ← v5.4.2
     ) {
         this.marketDataService = marketDataService;
         this.atrRiskManager    = atrRiskManager;
@@ -70,6 +83,7 @@ public class DerivTradeService {
         this.monitor           = monitor;
         this.errorHandler      = errorHandler;
         this.registry          = registry;
+        this.regimeRegistry    = regimeRegistry;     // ← v5.4.2
 
         this.marketDataService.onOpenContract(monitor::handleStreamUpdate);
     }
@@ -83,6 +97,14 @@ public class DerivTradeService {
      *
      * Executa as validações iniciais na thread do WebSocket (rápido)
      * e despacha a execução para uma virtual thread (I/O bound).
+     *
+     * Correção v5.4.2:
+     * O regime confirmado é agora consultado diretamente do RegimeRegistry
+     * antes da criação do TradeContext, garantindo que o campo regime seja
+     * preenchido corretamente em qualquer DecisionMode (VOTING, CONFLUENCE
+     * ou SINGLE_STRATEGY). Antes dessa correção, o regime era extraído do
+     * Signal.metadata, que só continha o campo "regime" no modo CONFLUENCE,
+     * resultando em regime vazio nos demais modos.
      *
      * @param profile    configuração do ativo
      * @param signal     sinal final (BUY/SELL)
@@ -114,8 +136,16 @@ public class DerivTradeService {
 
         logRiskResult(profile.getSymbol(), riskDecision);
 
+        // Consulta o regime confirmado do RegimeRegistry (v5.4.2)
+        // Retorna CHOPPY como padrão conservador se ainda não confirmado
+        String confirmedRegime = regimeRegistry
+                .getRegime(profile.getSymbol())
+                .name();
+
         TradeContext context = contextFactory.create(
-                profile, signal, riskDecision.adjustedAmount());
+                profile, signal,
+                riskDecision.adjustedAmount(),
+                confirmedRegime);                    // ← v5.4.2
 
         if (context.amount() <= 0.0) {
             log.warn("TRADE SKIP | symbol={} | reason=stake invalid "
@@ -285,16 +315,23 @@ public class DerivTradeService {
         }
     }
 
+    /**
+     * Registra o início de uma operação nos logs operacionais.
+     *
+     * Inclui o regime confirmado para rastreabilidade completa
+     * da decisão de entrada. (v5.4.2)
+     */
     private void logTradeStart(TradeContext context) {
         log.info("TRADE START | symbol={} | signal={} | contractType={} "
-                        + "| amount={} {} | duration={}{}",
+                        + "| amount={} {} | duration={}{} | regime={}",
                 context.symbol(),
                 context.signalType(),
                 context.contractType(),
                 context.amount(),
                 context.currency(),
                 context.duration(),
-                context.durationUnit());
+                context.durationUnit(),
+                context.regime().isBlank() ? "UNKNOWN" : context.regime());
     }
 
     private void logAvailabilityCheckFailure(
