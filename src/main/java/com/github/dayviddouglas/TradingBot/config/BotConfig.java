@@ -1,6 +1,7 @@
 package com.github.dayviddouglas.TradingBot.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dayviddouglas.TradingBot.bot.MultiSymbolDerivBotRunner;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivOtpService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivWsClient;
@@ -10,6 +11,7 @@ import com.github.dayviddouglas.TradingBot.deriv.ws.TickHeartbeat;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 /**
  * Classe de configuração central do bot.
@@ -71,11 +73,18 @@ public class BotConfig {
      * @return instância de DerivWsClient configurada
      */
     @Bean
+    @Primary
     public DerivWsClient derivWsClient(
             DerivOtpService otpService,
             TickHeartbeat tickHeartbeat
+
     ) {
         return new DerivWsClient(otpService::fetchWsUri, tickHeartbeat);
+    }
+
+    @Bean
+    public DerivWsClient derivWsClientSecond(MultiSymbolDerivBotRunner multiSymbolDerivBotRunner){
+      return new DerivWsClient(multiSymbolDerivBotRunner);
     }
 
     /**

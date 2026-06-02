@@ -71,41 +71,82 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
 
     @Override
     public void run(String... args) throws Exception {
-        List<StrategiesProfile> profiles =
-                strategiesLoader.getProfiles();
-
-        if (profiles.isEmpty()) {
-            log.error("No profiles loaded from strategies.json. Aborting.");
-            return;
-        }
-
-        log.info("BOT STARTING | profiles={}", profiles.size());
-
-        pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
-
-        if (pipelineRegistry.size() == 0) {
-            log.error("No valid pipelines built. Aborting.");
-            return;
-        }
-
-        registerMarketCallbacks();
-        registerConnectionCallbacks();
-
-        log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
-
-        // OTP é obtido automaticamente pelo DerivWsClient
-        // via uriSupplier antes de conectar
-        derivWsClient.connect();
-
-        log.info("BOT RUNNING | Press Ctrl+C to stop.");
-
-        Thread.currentThread().join();
+        connectBot();
     }
 
     // ═══════════════════════════════════════════════════════════════
     // Callbacks de conexão
     // ═══════════════════════════════════════════════════════════════
+  public void connectBot (){
+      List<StrategiesProfile> profiles =
+              strategiesLoader.getProfiles();
 
+      if (profiles.isEmpty()) {
+          log.error("No profiles loaded from strategies.json. Aborting.");
+          return;
+      }
+
+      log.info("BOT STARTING | profiles={}", profiles.size());
+
+      pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
+
+      if (pipelineRegistry.size() == 0) {
+          log.error("No valid pipelines built. Aborting.");
+          return;
+      }
+
+      registerMarketCallbacks();
+      registerConnectionCallbacks();
+
+      log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
+
+      // OTP é obtido automaticamente pelo DerivWsClient
+      // via uriSupplier antes de conectar
+      derivWsClient.connect();
+
+      log.info("BOT RUNNING | Press Ctrl+C to stop.");
+      try {
+
+          Thread.currentThread().join();
+
+
+      } catch (InterruptedException e) {
+          throw new RuntimeException(e);
+      }
+
+  }
+
+
+  public void reconnectionBot(){
+      log.info("WS CONNECTED | initializing pipelines...");
+      botInitializer.initialize(pipelineRegistry.getAll());
+      List<StrategiesProfile> profiles =
+              strategiesLoader.getProfiles();
+      if (profiles.isEmpty()) {
+          log.error("No profiles loaded from strategies.json. Aborting.");
+          return;
+      }
+
+
+      log.info("BOT STARTING | profiles={}", profiles.size());
+
+      pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
+
+      if (pipelineRegistry.size() == 0) {
+          log.error("No valid pipelines built. Aborting.");
+          return;
+      }
+
+      registerMarketCallbacks();
+
+      log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
+      log.info("BOT RUNNING | Press Ctrl+C to stop.");
+      try {
+          Thread.currentThread().join();
+      } catch (InterruptedException e) {
+          throw new RuntimeException(e);
+      }
+  }
     private void registerConnectionCallbacks() {
         derivWsClient.setOnConnected(() -> {
             try {
@@ -167,6 +208,8 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
             pipeline.engine().seedHistory(bars);
             log.info("HISTORY SEEDED | symbol={} | bars={}",
                     symbol, bars.size());
+
+            pipeline.engine().evaluateRegimeFromHistory();
         });
     }
 

@@ -1,5 +1,6 @@
 package com.github.dayviddouglas.TradingBot.deriv;
 
+import com.github.dayviddouglas.TradingBot.bot.MultiSymbolDerivBotRunner;
 import com.github.dayviddouglas.TradingBot.deriv.ws.TickHeartbeat;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
@@ -37,8 +38,8 @@ public class DerivWsClient implements AutoCloseable {
      * Para o runtime: chama DerivOtpService.fetchWsUri()
      * Para ferramentas standalone: retorna URI fixa
      */
-    private final Supplier<URI> uriSupplier;
-    private final TickHeartbeat tickHeartbeat;
+    private Supplier<URI> uriSupplier;
+    private TickHeartbeat tickHeartbeat;
 
     /**
      * Volatile porque pode ser substituída por uma nova instância
@@ -50,6 +51,8 @@ public class DerivWsClient implements AutoCloseable {
     private volatile Consumer<String>      messageHandler = msg -> {};
     private volatile Runnable              onConnected;
     private volatile Consumer<CloseEvent>  onDisconnected;
+
+    private MultiSymbolDerivBotRunner multiSymbolDerivBotRunner;
 
     public record CloseEvent(int code, String reason, boolean remote) {}
 
@@ -75,19 +78,26 @@ public class DerivWsClient implements AutoCloseable {
 
     /**
      * Construtor principal para runtime com OTP dinâmico.
-     *
+     * <p>
      * O uriSupplier é chamado apenas quando connect() ou
      * connectBlocking() for invocado — nunca no construtor.
      * Isso evita chamadas REST durante o startup do Spring.
      *
-     * @param uriSupplier   fornece a URI do WebSocket antes de cada conexão
-     * @param tickHeartbeat monitor de chegada de ticks
+     * @param uriSupplier               fornece a URI do WebSocket antes de cada conexão
+     * @param tickHeartbeat             monitor de chegada de ticks
+     *
      */
     public DerivWsClient(Supplier<URI> uriSupplier, TickHeartbeat tickHeartbeat) {
         this.uriSupplier   = uriSupplier;
         this.tickHeartbeat = tickHeartbeat;
         // internalClient NÃO é criado aqui — criado apenas em connect()
+
     }
+
+    public  DerivWsClient(MultiSymbolDerivBotRunner multiSymbolDerivBotRunner){
+        this.multiSymbolDerivBotRunner = multiSymbolDerivBotRunner;
+    }
+
 
     /**
      * Construtor retrocompatível para ferramentas standalone.
@@ -337,6 +347,8 @@ public class DerivWsClient implements AutoCloseable {
                 if (!connected || !internalClient.isOpen()) {
                     throw new IllegalStateException(
                             "Socket not open after connectBlocking");
+                }else{
+                    multiSymbolDerivBotRunner.reconnectionBot();
                 }
 
                 log.info("WS reconnection successful | attempt={}", attempt);
