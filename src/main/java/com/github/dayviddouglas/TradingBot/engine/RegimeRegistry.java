@@ -82,8 +82,10 @@ public class RegimeRegistry {
     public void updateRegime(String symbol, MarketRegime regime) {
         MarketRegime previous = confirmedRegimeBySymbol.put(symbol, regime);
 
-        // Loga apenas quando há mudança real de regime (não na primeira inicialização)
-        if (previous != null && previous != regime) {
+        if (previous == null) {
+            log.info("REGIME REGISTRY INITIAL | symbol={} | regime={}",
+                    symbol, regime);
+        } else if (previous != regime) {
             log.info("REGIME REGISTRY UPDATED | symbol={} | {} → {}",
                     symbol, previous, regime);
         }
@@ -123,5 +125,28 @@ public class RegimeRegistry {
      */
     public void clearRegime(String symbol) {
         confirmedRegimeBySymbol.remove(symbol);
+    }
+
+
+    /**
+     * Atualiza o regime confirmado de um símbolo sem gerar log.
+     *
+     * Usado exclusivamente durante o warm-up histórico pelo
+     * MarketRegimeMonitor.onRegimeConfirmedWarmUp() para suprimir
+     * logs de transições intermediárias do histórico que não
+     * representam eventos reais de mercado.
+     *
+     * O regime final confirmado ao término do warm-up é logado
+     * pelo StrategyEngine.evaluateRegimeFromHistory().
+     *
+     * ⚠️ Não usar no fluxo de runtime — usar updateRegime() que
+     * mantém rastreabilidade operacional completa nos logs.
+     *
+     * @param symbol símbolo do ativo
+     * @param regime novo regime confirmado silenciosamente
+     * @since v5.4.2
+     */
+    public void updateRegimeSilently(String symbol, MarketRegime regime) {
+        confirmedRegimeBySymbol.put(symbol, regime);
     }
 }

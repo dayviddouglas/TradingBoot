@@ -350,4 +350,48 @@ public class StrategyEngine {
                     decisionMode, symbol, strategies.size()));
         }
     }
+    /**
+     * Avalia o regime de mercado inicial a partir do histórico já carregado.
+     *
+     * Chamado pelo MultiSymbolDerivBotRunner após seedHistory() para garantir
+     * que o RegimeRegistry tenha um regime confirmado antes do bot começar
+     * a operar em tempo real, eliminando o período de warm-up onde o regime
+     * seria CHOPPY por padrão.
+     *
+     * Simula o pipeline completo do MarketRegimeMonitor percorrendo os bars
+     * históricos em ordem cronológica com a mesma lógica de decimação e
+     * confirmação usada em tempo real. O regime resultante reflete o estado
+     * do mercado ao final do histórico — o contexto mais relevante para o
+     * início das operações.
+     *
+     * Não emite sinais operacionais — apenas aciona o pipeline de regime.
+     * Os contadores de decimação do MarketRegimeMonitor são mantidos
+     * corretamente para continuidade no runtime.
+     *
+     * @since v5.4.2
+     */
+    public synchronized void evaluateRegimeFromHistory() {
+        if (regimeMonitor == null) return;
+
+        List<Bar> snapshot = barHistory.snapshot();
+        if (snapshot.isEmpty()) return;
+
+        log.info("REGIME WARM-UP START | symbol={} | bars={}",
+                symbol, snapshot.size());
+
+        // Percorre o histórico simulando a chegada de candles um por um.
+        // O MarketRegimeMonitor aplica sua própria decimação internamente,
+        // garantindo que apenas os marcos corretos disparem avaliação.
+        // Os contadores ficam no estado correto para continuidade no runtime.
+
+        int startFrom = 60;
+        for (int i = startFrom; i <= snapshot.size(); i++) {
+            regimeMonitor.onBar(symbol, snapshot.subList(0, i));
+        }
+
+        MarketRegime regimeFinal = regimeMonitor.getConfirmedRegime(symbol);
+
+        log.info("REGIME WARM-UP DONE | symbol={} | bars={}",
+                symbol, snapshot.size());
+    }
 }
