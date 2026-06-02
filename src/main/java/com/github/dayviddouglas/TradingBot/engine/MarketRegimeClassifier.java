@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -201,6 +202,19 @@ public class MarketRegimeClassifier {
      * @param bars lista de candles para análise
      * @return RegimeMetrics com regime e indicadores calculados
      */
+    /**
+     * Classifica o regime e retorna RegimeMetrics com todos os
+     * valores calculados para auditoria.
+     *
+     * Atualização v5.4.2:
+     * O timestamp do último candle da janela é incluído no RegimeMetrics
+     * como marketTimestamp. Esse valor representa o momento real de mercado
+     * da detecção, garantindo que os relatórios usem tempo de mercado
+     * em vez do Instant.now() do processamento.
+     *
+     * @param bars lista de candles para análise
+     * @return RegimeMetrics com regime, indicadores e timestamp de mercado
+     */
     public RegimeMetrics classifyWithMetrics(List<Bar> bars) {
 
         // Validação: precisa de candles suficientes
@@ -211,8 +225,13 @@ public class MarketRegimeClassifier {
                     bars != null ? bars.size() : 0);
             return buildMetrics(
                     Double.NaN, Double.NaN, Double.NaN,
-                    Double.NaN, Double.NaN, MarketRegime.CHOPPY);
+                    Double.NaN, Double.NaN, MarketRegime.CHOPPY,
+                    null);
         }
+
+        // Timestamp do último candle da janela — representa o momento
+        // real de mercado em que esse regime foi detectado (v5.4.2)
+        Instant marketTimestamp = bars.get(bars.size() - 1).timestamp();
 
         // Calcula os 3 detectores
         double atrFast    = atr(bars, atrFastPeriod);
@@ -235,17 +254,13 @@ public class MarketRegimeClassifier {
             return buildMetrics(
                     atrFast, atrBase,
                     Double.NaN, Double.NaN, efficiency,
-                    MarketRegime.CHOPPY);
+                    MarketRegime.CHOPPY, marketTimestamp);
         }
 
-        // Métricas derivadas
         double atrRatio    = atrFast / atrBase;
         double emaDistance = Math.abs(emaFast - emaSlow);
 
         // ── Detector: TRENDING ──
-        // Pergunta 1: ER >= 0.20 (preço foi em linha reta?)
-        // Pergunta 2: distância > ATR × 0.20 (EMAs separadas?)
-        // Pergunta 3: atrRatio >= 0.90 (volatilidade normal?)
         if (efficiency >= ER_TRENDING_MIN
                 && emaDistance > atrFast * EMA_DISTANCE_TRENDING_FACTOR
                 && atrRatio >= ATR_RATIO_TRENDING_MIN) {
@@ -255,13 +270,11 @@ public class MarketRegimeClassifier {
                     efficiency, emaDistance, atrRatio);
 
             return buildMetrics(atrFast, atrBase, atrRatio,
-                    emaDistance, efficiency, MarketRegime.TRENDING);
+                    emaDistance, efficiency, MarketRegime.TRENDING,
+                    marketTimestamp);
         }
 
         // ── Detector: RANGING ──
-        // Pergunta 1: ER <= 0.13 (preço ficou no lugar?)
-        // Pergunta 2: distância < ATR × 0.40 (EMAs coladas?)
-        // Pergunta 3: atrRatio <= 1.20 (volatilidade estável?)
         if (efficiency <= ER_RANGING_MAX
                 && emaDistance < atrFast * EMA_DISTANCE_RANGING_FACTOR
                 && atrRatio <= ATR_RATIO_RANGING_MAX) {
@@ -271,18 +284,18 @@ public class MarketRegimeClassifier {
                     efficiency, emaDistance, atrRatio);
 
             return buildMetrics(atrFast, atrBase, atrRatio,
-                    emaDistance, efficiency, MarketRegime.RANGING);
+                    emaDistance, efficiency, MarketRegime.RANGING,
+                    marketTimestamp);
         }
 
         // ── Fallback: CHOPPY ──
-        // Zona entre RANGING e TRENDING
-        // ER entre 0.13 e 0.20 → mercado indefinido
         log.debug("REGIME CLASSIFIER | regime=CHOPPY | "
                         + "efficiency={} emaDistance={} atrRatio={}",
                 efficiency, emaDistance, atrRatio);
 
         return buildMetrics(atrFast, atrBase, atrRatio,
-                emaDistance, efficiency, MarketRegime.CHOPPY);
+                emaDistance, efficiency, MarketRegime.CHOPPY,
+                marketTimestamp);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -398,16 +411,28 @@ public class MarketRegimeClassifier {
     // Factory de RegimeMetrics
     // ═══════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // Factory de RegimeMetrics — atualizado v5.4.2
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Constrói RegimeMetrics com todos os campos incluindo
+     * o timestamp de mercado do último candle analisado.
+     *
+     * @param marketTimestamp timestamp do último candle da janela
+     */
     private static RegimeMetrics buildMetrics(
             double atrFast,
             double atrBase,
             double atrRatio,
             double emaDistance,
             double efficiency,
-            MarketRegime regime
+            MarketRegime regime,
+            Instant marketTimestamp
     ) {
         return new RegimeMetrics(
                 atrFast, atrBase, atrRatio,
-                emaDistance, efficiency, regime);
+                emaDistance, efficiency,
+                regime, marketTimestamp);
     }
 }

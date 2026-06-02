@@ -137,17 +137,21 @@ public class RegimeStateTracker {
 
         // Caso 4: Threshold atingido → confirma transição
         if (state.candidateCounter >= CONFIRMATION_THRESHOLD) {
-            MarketRegime previousRegime = state.currentRegime;
+            MarketRegime previousRegime  = state.currentRegime;
             MarketRegime confirmedRegime = state.candidateRegime;
 
-            // Atualiza estado interno
-            state.currentRegime = confirmedRegime;
-            state.candidateRegime = null;
+            state.currentRegime    = confirmedRegime;
+            state.candidateRegime  = null;
             state.candidateCounter = 0;
 
-            // Constrói o evento de mudança de regime
+
+            Instant marketTimestamp = (metrics.marketTimestamp() != null)
+                    ? metrics.marketTimestamp()
+                    : Instant.now();
+
             RegimeChangeEvent event = new RegimeChangeEvent(
-                    Instant.now(),
+                    marketTimestamp,     // ← tempo real de mercado (v5.4.2)
+                    Instant.now(),       // ← tempo de processamento
                     symbol,
                     previousRegime,
                     confirmedRegime,
@@ -156,7 +160,6 @@ public class RegimeStateTracker {
 
             log.info("REGIME CONFIRMED | {}", event.toLogString());
 
-            // Notifica o caller (MarketRegimeMonitor) sobre a transição confirmada
             onConfirmed.accept(event);
         }
     }
