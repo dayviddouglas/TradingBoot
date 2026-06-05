@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.config;
+package com.github.dayviddouglas.TradingBot.config.strategy;
 
 /**
  * POJO de configuração de trade por ativo.

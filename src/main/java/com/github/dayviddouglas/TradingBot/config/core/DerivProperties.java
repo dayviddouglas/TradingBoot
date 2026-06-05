@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.config;
+package com.github.dayviddouglas.TradingBot.config.core;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;

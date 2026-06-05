@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.config;
+package com.github.dayviddouglas.TradingBot.config.core;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dayviddouglas.TradingBot.bot.MultiSymbolDerivBotRunner;

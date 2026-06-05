@@ -1,7 +1,7 @@
 package com.github.dayviddouglas.TradingBot.bot;
 
-import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
-import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
+import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesConfigLoader;
+import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.engine.regime.MarketRegimeMonitor;
 import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.market.TickCandleAggregator;

@@ -1,6 +1,6 @@
 package com.github.dayviddouglas.TradingBot.engine.core;
 
-import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
+import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionEvaluator;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionEvaluatorFactory;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;

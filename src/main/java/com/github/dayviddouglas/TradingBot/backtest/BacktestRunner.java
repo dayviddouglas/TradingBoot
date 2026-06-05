@@ -2,8 +2,7 @@ package com.github.dayviddouglas.TradingBot.backtest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
-import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
+import com.github.dayviddouglas.TradingBot.config.strategy.*;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
@@ -58,9 +57,9 @@ public class BacktestRunner {
      */
     public void runAll(BacktestConfig config) throws Exception {
         StrategiesConfigLoader loader = new StrategiesConfigLoader(
-                new com.github.dayviddouglas.TradingBot.config.StrategyBuilder(),
-                new com.github.dayviddouglas.TradingBot.config.StrategiesProfileParser(
-                        new com.github.dayviddouglas.TradingBot.config.StrategiesProfileValidator()
+                new StrategyBuilder(),
+                new StrategiesProfileParser(
+                        new StrategiesProfileValidator()
                 )
         );
 

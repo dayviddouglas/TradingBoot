@@ -2,7 +2,7 @@ package com.github.dayviddouglas.TradingBot.deriv;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.dayviddouglas.TradingBot.config.DerivProperties;
+import com.github.dayviddouglas.TradingBot.config.core.DerivProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;

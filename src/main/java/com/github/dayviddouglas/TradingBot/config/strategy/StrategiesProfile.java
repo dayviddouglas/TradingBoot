@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.config;
+package com.github.dayviddouglas.TradingBot.config.strategy;
 
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 

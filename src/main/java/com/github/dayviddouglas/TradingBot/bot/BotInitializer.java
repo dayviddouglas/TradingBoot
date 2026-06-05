@@ -1,7 +1,7 @@
 package com.github.dayviddouglas.TradingBot.bot;
 
-import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.config.TradeConfig;
+import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
+import com.github.dayviddouglas.TradingBot.config.strategy.TradeConfig;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivTradeService;
 import org.slf4j.Logger;
