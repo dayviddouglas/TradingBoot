@@ -94,6 +94,10 @@ public class TradeValidator {
         return blockedSymbols.contains(symbol);
     }
 
+    public void cleanListBlockedSymbols(){
+        blockedSymbols.clear();
+    }
+
     private ValidationResult skipWithDebug(String symbol, String reason) {
         log.debug("TRADE SKIP | symbol={} | reason={}", symbol != null ? symbol : "N/A", reason);
         return ValidationResult.skip(reason);
