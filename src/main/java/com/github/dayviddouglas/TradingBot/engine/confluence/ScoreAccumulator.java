@@ -1,10 +1,9 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.confluence;
 
 import com.github.dayviddouglas.TradingBot.model.Signal;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Responsável por acumular votos ponderados das estratégias.

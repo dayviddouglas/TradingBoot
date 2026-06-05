@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.engine.DecisionMode;
+import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
 import org.slf4j.Logger;

@@ -5,7 +5,7 @@ import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivTradeService;
 import com.github.dayviddouglas.TradingBot.deriv.DerivWsClient;
-import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
+import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 import org.slf4j.Logger;
@@ -14,7 +14,6 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**

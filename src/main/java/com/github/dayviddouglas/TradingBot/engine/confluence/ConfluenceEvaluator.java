@@ -1,5 +1,7 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.confluence;
 
+import com.github.dayviddouglas.TradingBot.engine.decision.DecisionEvaluator;
+import com.github.dayviddouglas.TradingBot.engine.decision.EvaluationResult;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;

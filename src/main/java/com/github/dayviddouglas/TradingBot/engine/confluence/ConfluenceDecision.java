@@ -1,5 +1,6 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.confluence;
 
+import com.github.dayviddouglas.TradingBot.engine.regime.MarketRegime;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 
 import java.util.List;

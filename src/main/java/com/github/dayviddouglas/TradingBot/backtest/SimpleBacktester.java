@@ -1,9 +1,9 @@
 package com.github.dayviddouglas.TradingBot.backtest;
 
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.engine.DecisionMode;
-import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
-import com.github.dayviddouglas.TradingBot.engine.VolatilityFilter;
+import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
+import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
+import com.github.dayviddouglas.TradingBot.engine.filter.VolatilityFilter;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;

@@ -1,6 +1,6 @@
 package com.github.dayviddouglas.TradingBot.config;
 
-import com.github.dayviddouglas.TradingBot.engine.DecisionMode;
+import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 import org.springframework.stereotype.Component;
 
 /**

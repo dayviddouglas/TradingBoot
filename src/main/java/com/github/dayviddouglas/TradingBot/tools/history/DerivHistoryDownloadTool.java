@@ -77,8 +77,8 @@ public class DerivHistoryDownloadTool {
             "frxUSDSEK"
     );
 
-    private static final int GRANULARITY_SECONDS  = 60;
-    private static final int DAYS_BACK            = 10;
+    private static final int GRANULARITY_SECONDS  = 300;
+    private static final int DAYS_BACK            = 90;
     private static final int COUNT_PER_REQUEST    = 1000;
     private static final int TIMEOUT_SECONDS      = 60;
     private static final int MAX_PAGES_PER_SYMBOL = 5000;

@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.core;
 
 import com.github.dayviddouglas.TradingBot.model.Bar;
 

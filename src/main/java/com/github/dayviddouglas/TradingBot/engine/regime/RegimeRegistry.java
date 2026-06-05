@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.regime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

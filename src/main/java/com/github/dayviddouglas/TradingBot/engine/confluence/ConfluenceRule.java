@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.confluence;
 
 import com.github.dayviddouglas.TradingBot.model.Signal;
 

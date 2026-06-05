@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.decision;
 
 /**
  * Enum que define o modo de decisão do StrategyEngine.

@@ -2,8 +2,7 @@ package com.github.dayviddouglas.TradingBot.deriv;
 
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.deriv.trade.*;
-import com.github.dayviddouglas.TradingBot.engine.MarketRegime;
-import com.github.dayviddouglas.TradingBot.engine.RegimeRegistry;
+import com.github.dayviddouglas.TradingBot.engine.regime.RegimeRegistry;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.model.Signal;

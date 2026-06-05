@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.regime;
 
 /**
  * Enum que classifica o regime (contexto) atual do mercado.

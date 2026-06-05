@@ -1,4 +1,6 @@
-package com.github.dayviddouglas.TradingBot.engine;
+package com.github.dayviddouglas.TradingBot.engine.decision;
+
+import com.github.dayviddouglas.TradingBot.engine.confluence.ConfluenceEvaluator;
 
 /**
  * Factory responsável por criar o DecisionEvaluator correto para cada DecisionMode.

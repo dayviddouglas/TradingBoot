@@ -2,9 +2,8 @@ package com.github.dayviddouglas.TradingBot.bot;
 
 import com.github.dayviddouglas.TradingBot.config.StrategiesConfigLoader;
 import com.github.dayviddouglas.TradingBot.config.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.engine.MarketRegimeMonitor;
-import com.github.dayviddouglas.TradingBot.engine.StrategyEngine;
-import com.github.dayviddouglas.TradingBot.engine.VolatilityFilter;
+import com.github.dayviddouglas.TradingBot.engine.regime.MarketRegimeMonitor;
+import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.market.TickCandleAggregator;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
 import org.slf4j.Logger;
