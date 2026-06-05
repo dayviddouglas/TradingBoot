@@ -1,5 +1,7 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.context;
 
+import com.github.dayviddouglas.TradingBot.deriv.trade.monitor.TradeState;
+import com.github.dayviddouglas.TradingBot.deriv.trade.validation.TradeValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;

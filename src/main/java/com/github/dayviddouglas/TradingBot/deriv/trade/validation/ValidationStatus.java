@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.validation;
 
 /**
  * Status possíveis de uma validação de trade.

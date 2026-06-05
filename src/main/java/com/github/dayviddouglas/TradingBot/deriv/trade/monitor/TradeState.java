@@ -1,5 +1,6 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.monitor;
 
+import com.github.dayviddouglas.TradingBot.deriv.trade.context.TradeContext;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 
 import java.time.Instant;

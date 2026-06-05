@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.context;
 
 import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.config.strategy.TradeConfig;

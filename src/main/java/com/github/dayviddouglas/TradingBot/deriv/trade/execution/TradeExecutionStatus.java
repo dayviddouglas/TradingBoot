@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.execution;
 
 /**
  * Status possíveis de uma execução de trade.

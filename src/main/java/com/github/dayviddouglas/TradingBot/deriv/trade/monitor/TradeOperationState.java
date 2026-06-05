@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.monitor;
 
 /**
  * Estados possíveis de uma operação de trade por ativo.

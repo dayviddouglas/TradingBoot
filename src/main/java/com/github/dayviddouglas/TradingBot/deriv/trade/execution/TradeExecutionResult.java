@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.execution;
 
 /**
  * Resultado imutável de uma tentativa de execução de trade.

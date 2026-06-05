@@ -1,7 +1,8 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.monitor;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService;
+import com.github.dayviddouglas.TradingBot.deriv.trade.context.TradeContext;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.report.TradeReportEntry;
 import com.github.dayviddouglas.TradingBot.report.TradeReportService;

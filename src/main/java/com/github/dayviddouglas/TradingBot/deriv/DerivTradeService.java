@@ -1,7 +1,16 @@
 package com.github.dayviddouglas.TradingBot.deriv;
 
 import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
-import com.github.dayviddouglas.TradingBot.deriv.trade.*;
+import com.github.dayviddouglas.TradingBot.deriv.trade.context.TradeContext;
+import com.github.dayviddouglas.TradingBot.deriv.trade.context.TradeContextFactory;
+import com.github.dayviddouglas.TradingBot.deriv.trade.context.TradeErrorHandler;
+import com.github.dayviddouglas.TradingBot.deriv.trade.execution.TradeExecutionResult;
+import com.github.dayviddouglas.TradingBot.deriv.trade.execution.TradeExecutor;
+import com.github.dayviddouglas.TradingBot.deriv.trade.monitor.TradeMonitor;
+import com.github.dayviddouglas.TradingBot.deriv.trade.monitor.TradeState;
+import com.github.dayviddouglas.TradingBot.deriv.trade.monitor.TradeStateRegistry;
+import com.github.dayviddouglas.TradingBot.deriv.trade.validation.TradeValidator;
+import com.github.dayviddouglas.TradingBot.deriv.trade.validation.ValidationResult;
 import com.github.dayviddouglas.TradingBot.engine.regime.RegimeRegistry;
 import com.github.dayviddouglas.TradingBot.exceptions.DerivErrorException;
 import com.github.dayviddouglas.TradingBot.model.Bar;
@@ -55,12 +64,12 @@ public class DerivTradeService {
 
     private final DerivMarketDataService marketDataService;
     private final AtrRiskManager         atrRiskManager;
-    private final TradeValidator         validator;
-    private final TradeContextFactory    contextFactory;
-    private final TradeExecutor          executor;
-    private final TradeMonitor           monitor;
-    private final TradeErrorHandler      errorHandler;
-    private final TradeStateRegistry     registry;
+    private final TradeValidator validator;
+    private final TradeContextFactory contextFactory;
+    private final TradeExecutor executor;
+    private final TradeMonitor monitor;
+    private final TradeErrorHandler errorHandler;
+    private final TradeStateRegistry registry;
     private final RegimeRegistry         regimeRegistry;  // ← v5.4.2
 
     public DerivTradeService(

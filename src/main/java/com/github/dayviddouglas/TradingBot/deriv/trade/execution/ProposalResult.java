@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.deriv.trade;
+package com.github.dayviddouglas.TradingBot.deriv.trade.execution;
 
 /**
  * Resultado imutável de uma requisição de proposal à API Deriv.
