@@ -1,4 +1,4 @@
-package com.github.dayviddouglas.TradingBot.backtest;
+package com.github.dayviddouglas.TradingBot.backtest.result;
 
 /**
  * Resultado imutável de uma operação simulada no backtest.

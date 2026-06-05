@@ -1,5 +1,8 @@
-package com.github.dayviddouglas.TradingBot.backtest;
+package com.github.dayviddouglas.TradingBot.backtest.runner;
 
+import com.github.dayviddouglas.TradingBot.backtest.result.BacktestMetricsCalculator;
+import com.github.dayviddouglas.TradingBot.backtest.result.BacktestReport;
+import com.github.dayviddouglas.TradingBot.backtest.result.TradeResult;
 import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;

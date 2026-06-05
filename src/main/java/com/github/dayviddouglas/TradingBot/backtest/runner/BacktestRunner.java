@@ -1,7 +1,9 @@
-package com.github.dayviddouglas.TradingBot.backtest;
+package com.github.dayviddouglas.TradingBot.backtest.runner;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dayviddouglas.TradingBot.backtest.result.BacktestReport;
+import com.github.dayviddouglas.TradingBot.backtest.output.BacktestReportPrinter;
 import com.github.dayviddouglas.TradingBot.config.strategy.*;
 import com.github.dayviddouglas.TradingBot.engine.decision.DecisionMode;
 import com.github.dayviddouglas.TradingBot.model.Bar;

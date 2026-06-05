@@ -1,4 +1,6 @@
-package com.github.dayviddouglas.TradingBot.backtest;
+package com.github.dayviddouglas.TradingBot.backtest.output;
+
+import com.github.dayviddouglas.TradingBot.backtest.result.BacktestReport;
 
 import java.util.List;
 
