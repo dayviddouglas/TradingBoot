@@ -889,18 +889,32 @@ A explicação detalhada dos parâmetros de cada estratégia está na
 TradingBot/
 │
 ├── src/main/java/com/github/dayviddouglas/TradingBot/
-│   ├── backtest/          motor de backtest
+│   ├── backtest/
+│   │   ├── runner/        orquestração e configuração do backtest
+│   │   ├── result/        métricas e relatórios de resultado
+│   │   └── output/        impressão e exportação
 │   ├── bot/               orquestração do runtime
-│   ├── config/            configuração e loading de profiles
-│   ├── deriv/             integração com Deriv
-│   ├── deriv/trade/       execução e monitoramento de trades
+│   ├── config/
+│   │   ├── core/          beans e propriedades do Spring
+│   │   └── strategy/      loading e validação do strategies.json
+│   ├── deriv/             integração com a Deriv
+│   ├── deriv/trade/
+│   │   ├── context/       contexto e tratamento de erros
+│   │   ├── execution/     proposal, ROI e compra
+│   │   ├── monitor/       acompanhamento de contrato
+│   │   └── validation/    validação de pré-condições
 │   ├── deriv/ws/          infraestrutura WebSocket
-│   ├── engine/            motor de decisão e regime
+│   ├── engine/
+│   │   ├── core/          pipeline principal (StrategyEngine, BarHistory)
+│   │   ├── decision/      modos de decisão (VOTING, SINGLE_STRATEGY)
+│   │   ├── decision/confluence/  modo CONFLUENCE e scores ponderados
+│   │   ├── filter/        filtros operacionais (VolatilityFilter)
+│   │   └── regime/        classificação e monitoramento de regime
 │   ├── exceptions/        exceções tipadas
-│   ├── market/            agregação de ticks
+│   ├── market/            agregação de ticks em candles
 │   ├── model/             modelos principais (Bar, Signal)
 │   ├── report/            relatórios operacionais
-│   ├── risk/              risco e stake
+│   ├── risk/              gestão de risco por ATR
 │   ├── strategy/          estratégias técnicas
 │   └── tools/             ferramentas standalone
 │
@@ -908,8 +922,8 @@ TradingBot/
 │   ├── application.yml    NÃO versionado
 │   └── strategies.json    NÃO versionado
 │
-├├── data/
-│   ├── history/           histórico de candles
+├── data/
+│   ├── history/           histórico de candles por ativo
 │   └── reports/           relatórios do runtime
 │
 └── pom.xml
@@ -3062,7 +3076,7 @@ data/reports/
 ├── trades_{symbol}_{date}.csv
 ├── trades_{symbol}_{date}.json
 ├── daily_summary_{date}.json
-└── regime_history_{symbol}_{date}.json
+└── regime_report_{symbol}_{date}.json
 
 ```
 
@@ -3127,30 +3141,63 @@ Campos principais:
 </details>
 
 <details>
-<summary><strong>15.3 regime_history</strong></summary>
+<summary><strong>15.3 regime_report</strong></summary>
+
+O relatório de regime é gerado em um único arquivo JSON por ativo por dia,
+unificando os dados técnicos de transições e o resumo percentual do comportamento
+do mercado.
 
 ```json
-[
-  {
-    "timestamp": "2026-04-29T12:30:00Z",
-    "symbol": "frxEURUSD",
-    "previousRegime": "CHOPPY",
-    "currentRegime": "RANGING",
-    "efficiency": 0.11,
-    "emaDistance": 0.000032,
-    "atrRatio": 1.12
-  }
-]
+{
+   "symbol": "frxEURUSD",
+   "date": "2026-04-29",
+   "summary": {
+      "totalMinutes": 480,
+      "distribution": {
+         "RANGING":  { "minutes": 210, "percent": 43.8 },
+         "CHOPPY":   { "minutes": 195, "percent": 40.6 },
+         "TRENDING": { "minutes": 75,  "percent": 15.6 }
+      },
+      "currentRegime": "RANGING",
+      "currentRegimeSince": "18:30"
+   },
+   "events": [
+      {
+         "marketTimestamp": "2026-04-29T12:30:00Z",
+         "marketTimestampBrasilia": "2026-04-29T09:30-03:00",
+         "processingTimestamp": "2026-04-29T12:30:01.123Z",
+         "symbol": "frxEURUSD",
+         "previousRegime": "CHOPPY",
+         "currentRegime": "RANGING",
+         "durationMinutes": 210,
+         "atrFast": 0.000134,
+         "atrBase": 0.000120,
+         "atrRatio": 1.12,
+         "emaDistance": 0.000032,
+         "efficiency": 0.11,
+         "metricsValid": true
+      }
+   ]
+}
 ```
 
-| Campo | Descrição |
-|---|---|
-| `timestamp` | momento da confirmação (UTC) |
-| `previousRegime` | regime anterior |
-| `currentRegime` | regime confirmado |
-| `efficiency` | ER calculado |
-| `emaDistance` | distância entre EMAs |
-| `atrRatio` | razão de volatilidade |
+| Campo | Descrição                                          |
+|---|----------------------------------------------------|
+| `summary.totalMinutes` | Tempo total observado no dia.                      |
+| `summary.distribution` | Percentual do tempo em cada regime.                |
+| `summary.currentRegime` | regime ativo no momento.                           |
+| `summary.currentRegimeSince` | horário de início do regime atual (Brasília).<br/> |
+| `events[].marketTimestamp` | momento real de mercado da confirmação (UTC).      |
+| `events[].processingTimestamp` | momento em que o sistema processou.                |
+| `events[].durationMinutes` | quanto tempo o regime durou.                       |
+| `events[].efficiency` | Efficiency Ratio calculado.                        |
+| `events[].emaDistance` | distância entre EMA 8 e EMA 21.                    |
+| `events[].atrRatio` | razão de volatilidade.                             |
+
+> **Observação:** O processingTimestamp é mantido para diagnóstico. Durante o warm-up histórico
+>ele será muito próximo do horário de startup, enquanto o marketTimestamp
+>reflete o tempo real de mercado.
+
 
 </details>
 
@@ -3410,8 +3457,15 @@ Rate limit do Cloudflare. O sistema tenta novamente automaticamente:
 <details>
 <summary><strong>Por que o regime sempre aparece como RANGING?</strong></summary>
 
-- Histórico insuficiente (precisa de pelo menos 200 candles)
-- Aguarde o warm-up de 45 minutos
+- Histórico insuficiente (precisa de pelo menos 200 candles para classificar)
+- O regime é confirmado após o startup via warm-up do histórico carregado.
+  Se o histórico for menor que 200 candles, o regime permanece CHOPPY por padrão.
+- Em runtime, uma mudança de regime exige 3 avaliações consecutivas,
+  o que representa 45 minutos de permanência no novo estado.
+- Se o arquivo `regime_report_{symbol}_{date}.json` estiver sendo gerado
+  mas o `currentRegime` sempre aparecer como RANGING, verifique os
+  thresholds de `efficiency` e `emaDistance` nos eventos — pode indicar
+  que o ativo opera predominantemente em lateral naquele período.
 
 </details>
 
