@@ -9,46 +9,39 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Factory responsável por construir o TradeContext a partir do
- * StrategiesProfile, do Signal final e do regime confirmado.
+ * Responsável por construir o {@link TradeContext} a partir do {@link StrategiesProfile},
+ * do {@link Signal} final e do regime de mercado confirmado.
  *
- * Responsabilidades:
- * - Mapear Signal.Type → contractType da API Deriv (BUY→CALL, SELL→PUT)
- * - Extrair decisionStrategies do metadata do Signal
- * - Normalizar stake para 2 casas decimais
- * - Receber regime confirmado do RegimeRegistry via DerivTradeService (v5)
- * - Carregar minRoiPercent do TradeConfig para o TradeContext (v5.4)
- * - Montar TradeContext imutável pronto para execução
+ * Concentra as seguintes responsabilidades de preparação para execução:
+ * - Mapear {@link Signal.Type} para o tipo de contrato da API Deriv ({@code BUY→CALL}, {@code SELL→PUT})
+ * - Extrair {@code decisionStrategies} do metadata do {@link Signal}
+ * - Normalizar o stake para 2 casas decimais, respeitando a restrição da API Deriv
+ * - Receber o regime confirmado do {@code RegimeRegistry} via {@link com.github.dayviddouglas.TradingBot.deriv.DerivTradeService}
+ * - Carregar {@code minRoiPercent} do {@link TradeConfig} para o {@link TradeContext}
+ * - Montar o {@link TradeContext} imutável pronto para o {@code TradeExecutor}
  *
- * Mudança v4 → v5:
- * O método create() recebe o regime como parâmetro String em vez de
- * extraí-lo do Signal.metadata, garantindo regime confirmado pelo
- * filtro de persistência de Hamilton [1989] em qualquer DecisionMode.
+ * Disponibiliza dois métodos {@code create()}: o principal recebe o regime como parâmetro
+ * externo (regime confirmado pelo filtro de persistência, disponível em qualquer
+ * {@code DecisionMode}); a sobrecarga retrocompatível extrai o regime do
+ * {@code Signal.metadata} e é mantida para uso em contextos sem {@code RegimeRegistry}.
  *
- * Atualização v5.4:
- * O campo minRoiPercent é lido do TradeConfig e passado para o
- * TradeContext, implementando o SUG-02 — ROI mínimo configurável
- * por ativo via strategies.json em vez de hardcoded no TradeExecutor.
- *
- * ⚠️ SUG-01 pendente: extractDecisionStrategies() está duplicado no
- * DerivTradeService. Consolidar em SignalMetadataExtractor futuramente.
+ * O campo {@code minRoiPercent} é lido do {@link TradeConfig} e encaminhado ao
+ * {@link TradeContext}, permitindo que o {@code TradeExecutor} aplique o limiar
+ * configurado por ativo em vez de um valor fixo global.
  */
 @Component
 public class TradeContextFactory {
 
     /**
-     * Constrói o TradeContext a partir do profile, signal e regime confirmado.
+     * Constrói o {@link TradeContext} a partir do profile, signal e regime confirmado externamente.
+     * Este é o método utilizado pelo runtime, onde o regime é consultado do {@code RegimeRegistry}
+     * antes da criação do contexto.
      *
-     * Atualização v5.4:
-     * minRoiPercent é lido do TradeConfig e incluído no TradeContext,
-     * permitindo que o TradeExecutor use o valor configurado por ativo
-     * em vez de uma constante global.
-     *
-     * @param profile          configuração do ativo
-     * @param signal           sinal final emitido pelo StrategyEngine
-     * @param adjustedAmount   stake ajustado pelo AtrRiskManager
-     * @param confirmedRegime  regime confirmado consultado do RegimeRegistry
-     * @return TradeContext imutável pronto para execução
+     * @param profile          configuração do ativo lida do strategies.json
+     * @param signal           sinal final emitido pelo {@code StrategyEngine}
+     * @param adjustedAmount   stake calculado pelo {@code AtrRiskManager}
+     * @param confirmedRegime  regime confirmado consultado do {@code RegimeRegistry}
+     * @return {@link TradeContext} imutável pronto para execução
      */
     public TradeContext create(
             StrategiesProfile profile,
@@ -63,6 +56,7 @@ public class TradeContextFactory {
         List<String> decisionStrategies  = extractDecisionStrategies(signal);
         String       decisionMode        = extractMetadataString(signal, "decisionMode");
 
+        // Usa o regime confirmado externamente; string vazia como fallback se ausente
         String regime = (confirmedRegime != null && !confirmedRegime.isBlank())
                 ? confirmedRegime
                 : "";
@@ -79,23 +73,23 @@ public class TradeContextFactory {
                 decisionStrategies,
                 regime,
                 signal.getType(),
-                trade.getMinRoiPercent()   // ← v5.4: lido do TradeConfig
+                trade.getMinRoiPercent()
         );
     }
 
     /**
      * Sobrecarga retrocompatível sem regime externo.
+     * Extrai o regime diretamente do {@code Signal.metadata}, comportamento equivalente
+     * ao fluxo anterior à integração com o {@code RegimeRegistry}.
      *
-     * Mantida para uso no backtest e testes unitários onde o
-     * RegimeRegistry não está disponível. Extrai o regime do
-     * Signal.metadata como antes.
+     * Utilizada em contextos onde o {@code RegimeRegistry} não está disponível,
+     * como backtest e testes unitários. No runtime, o método principal com
+     * {@code confirmedRegime} deve ser sempre utilizado.
      *
-     * ⚠️ No runtime, usar sempre o método create() com confirmedRegime.
-     *
-     * @param profile        configuração do ativo
-     * @param signal         sinal final emitido pelo StrategyEngine
-     * @param adjustedAmount stake ajustado pelo AtrRiskManager
-     * @return TradeContext imutável pronto para execução
+     * @param profile        configuração do ativo lida do strategies.json
+     * @param signal         sinal final emitido pelo {@code StrategyEngine}
+     * @param adjustedAmount stake calculado pelo {@code AtrRiskManager}
+     * @return {@link TradeContext} imutável pronto para execução
      */
     public TradeContext create(
             StrategiesProfile profile,
@@ -112,14 +106,13 @@ public class TradeContextFactory {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Converte tipo de sinal para tipo de contrato da API Deriv.
+     * Converte o tipo de sinal para o tipo de contrato aceito pela API Deriv.
+     * {@code BUY} representa aposta na alta do ativo ({@code CALL}).
+     * {@code SELL} representa aposta na baixa do ativo ({@code PUT}).
      *
-     * BUY  → CALL (aposta na alta)
-     * SELL → PUT  (aposta na baixa)
-     *
-     * @param signalType tipo do sinal
-     * @return tipo de contrato correspondente
-     * @throws IllegalArgumentException se o sinal for NONE
+     * @param signalType tipo do sinal gerado pelo engine
+     * @return tipo de contrato correspondente para envio à API
+     * @throws IllegalArgumentException se o tipo de sinal for {@code NONE}
      */
     private String mapToContractType(Signal.Type signalType) {
         return switch (signalType) {
@@ -135,13 +128,14 @@ public class TradeContextFactory {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Normaliza o stake para 2 casas decimais.
-     *
-     * A API Deriv rejeita stakes com mais de 2 casas decimais.
-     * Garante também stake mínimo positivo de 0.01.
+     * Normaliza o stake para 2 casas decimais, respeitando a restrição da API Deriv
+     * que rejeita stakes com mais de 2 casas decimais.
+     * Garante stake mínimo positivo de {@code 0.01} para valores arredondados
+     * que resultem em zero por truncamento.
+     * Retorna {@code 0.0} para valores inválidos, infinitos ou negativos.
      *
      * @param amount valor original do stake
-     * @return stake normalizado
+     * @return stake normalizado com até 2 casas decimais
      */
     private double normalizeStake(double amount) {
         if (!Double.isFinite(amount) || amount <= 0.0) {
@@ -150,6 +144,7 @@ public class TradeContextFactory {
 
         double rounded = Math.round(amount * 100.0) / 100.0;
 
+        // Evita stake zero por arredondamento quando o valor original era positivo
         if (rounded > 0.0 && rounded < 0.01) {
             return 0.01;
         }
@@ -162,13 +157,12 @@ public class TradeContextFactory {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Extrai a lista de estratégias decisoras do metadata do Signal.
+     * Extrai a lista de estratégias que participaram da decisão do metadata do {@link Signal}.
+     * Converte cada elemento para {@code String}, filtrando valores nulos.
+     * Retorna lista vazia quando o metadata for nulo ou o campo estiver ausente.
      *
-     * ⚠️ SUG-01 pendente: duplicado no DerivTradeService.
-     * Consolidar em SignalMetadataExtractor em evolução futura.
-     *
-     * @param signal sinal com metadata
-     * @return lista de nomes de estratégias ou lista vazia
+     * @param signal sinal com metadata populado pelo {@code SignalEmitter}
+     * @return lista de nomes das estratégias decisoras ou lista vazia
      */
     @SuppressWarnings("unchecked")
     private List<String> extractDecisionStrategies(Signal signal) {
@@ -186,12 +180,12 @@ public class TradeContextFactory {
     }
 
     /**
-     * Extrai um valor String do metadata do Signal com fallback
-     * para string vazia.
+     * Extrai um valor {@code String} do metadata do {@link Signal} pela chave informada.
+     * Retorna string vazia quando o metadata for nulo ou a chave estiver ausente.
      *
-     * @param signal signal com metadata
-     * @param key    chave do campo desejado
-     * @return valor como String ou string vazia se ausente
+     * @param signal sinal com metadata populado pelo {@code SignalEmitter}
+     * @param key    nome do campo a ser extraído do metadata
+     * @return valor como {@code String} ou string vazia se ausente
      */
     private String extractMetadataString(Signal signal, String key) {
         if (signal.getMetadata() == null) return "";

@@ -12,20 +12,24 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 
 /**
- * Responsável pela paginação automática de histórico de candles.
+ * Responsável pela paginação automática de histórico de candles junto à API Deriv.
  *
- * Extraído do DerivMarketDataService para respeitar SRP:
- * - DerivMarketDataService roteia mensagens
- * - DerivHistoryPaginator gerencia o ciclo de paginação
+ * A API Deriv limita cada requisição de histórico a {@value MAX_PER_REQUEST} candles.
+ * Quando a quantidade solicitada excede esse limite, este componente divide a requisição
+ * em páginas sequenciais, coletando do presente ao passado:
+ * <ol>
+ *   <li>Solicita a primeira página com até {@value MAX_PER_REQUEST} candles a partir de "latest"</li>
+ *   <li>Ao receber cada página, verifica se ainda há candles restantes a buscar</li>
+ *   <li>Quando necessário, solicita a próxima página usando o timestamp do candle mais antigo
+ *       da página atual como ponto de corte ({@code endEpoch - 1})</li>
+ *   <li>Ao atingir a quantidade total ou esgotar o histórico disponível, entrega todos os
+ *       candles acumulados via callback ao chamador original</li>
+ * </ol>
  *
- * A API Deriv limita cada requisição a 1000 candles.
- * Quando o count solicitado excede esse limite, este componente:
- * 1. Divide em páginas de até 1000 candles
- * 2. Solicita do presente ao passado
- * 3. Acumula resultados no PaginationContext
- * 4. Entrega o histórico completo via callback ao concluir
- *
- * Thread-safety: ConcurrentHashMap para contextos e rotas.
+ * A correlação entre páginas e contextos é mantida por dois mapas thread-safe:
+ * {@code contextsByParentReqId} mapeia o ID pai para o {@link PaginationContext} acumulador,
+ * e {@code routesByPageReqId} mapeia o ID de cada página para sua {@link PageRoute},
+ * que contém a referência ao ID pai.
  */
 @Component
 public class DerivHistoryPaginator {
@@ -33,28 +37,45 @@ public class DerivHistoryPaginator {
     private static final Logger log =
             LoggerFactory.getLogger(DerivHistoryPaginator.class);
 
+    /** Limite máximo de candles por requisição imposto pela API Deriv. */
     private static final int MAX_PER_REQUEST = 1000;
 
     private final DerivRequestSender requestSender;
 
+    /**
+     * Contextos de paginação ativos, indexados pelo ID pai gerado internamente.
+     * Cada contexto acumula as barras recebidas de todas as páginas de uma mesma requisição.
+     */
     private final Map<Long, PaginationContext> contextsByParentReqId =
             new ConcurrentHashMap<>();
 
+    /**
+     * Mapeamento de ID de página para sua rota de paginação.
+     * Permite identificar, ao receber uma resposta de histórico, se ela pertence
+     * a uma paginação em andamento e qual é o contexto acumulador correspondente.
+     */
     private final Map<Long, PageRoute> routesByPageReqId =
             new ConcurrentHashMap<>();
 
+    /**
+     * @param requestSender utilizado para enviar os requests de histórico via WebSocket
+     */
     public DerivHistoryPaginator(DerivRequestSender requestSender) {
         this.requestSender = requestSender;
     }
 
     /**
-     * Inicia requisição de histórico com paginação automática.
+     * Inicia uma requisição de histórico com paginação automática.
+     * Quando {@code count} for menor ou igual a {@value MAX_PER_REQUEST}, envia uma
+     * única página. Quando exceder o limite, inicia o ciclo de paginação e registra
+     * o número estimado de páginas necessárias.
      *
      * @param symbol             símbolo do ativo
-     * @param granularitySeconds granularidade em segundos
-     * @param count              quantidade total desejada
-     * @param onComplete         callback chamado quando concluído
-     * @return parentReqId para correlação externa
+     * @param granularitySeconds granularidade dos candles em segundos
+     * @param count              quantidade total de candles desejada
+     * @param onComplete         callback invocado com o ID pai e a lista completa de candles
+     *                           ao concluir todas as páginas
+     * @return ID pai da requisição, utilizado para correlação externa
      */
     public long request(
             String symbol,
@@ -84,14 +105,18 @@ public class DerivHistoryPaginator {
 
     /**
      * Processa uma página de histórico recebida da API.
+     * Quando o {@code reqId} corresponder a uma rota de paginação registrada,
+     * delega ao fluxo paginado; caso contrário, trata como requisição simples
+     * e entrega diretamente ao callback do contexto.
      *
-     * @param reqId ID da requisição desta página
-     * @param bars  barras recebidas e parseadas
+     * @param reqId ID da requisição da página recebida
+     * @param bars  candles parseados recebidos nesta página
      */
     public void handlePage(long reqId, List<Bar> bars) {
         PageRoute route = routesByPageReqId.remove(reqId);
 
         if (route == null) {
+            // Requisição sem paginação: entrega diretamente ao callback
             deliverSimplePage(reqId, bars);
             return;
         }
@@ -100,8 +125,9 @@ public class DerivHistoryPaginator {
     }
 
     /**
-     * Trata erro em página de histórico paginado.
-     * Entrega resultado parcial acumulado sem perder dados já recebidos.
+     * Trata erro em uma página de histórico paginado.
+     * Entrega ao callback o resultado parcial já acumulado até o momento da falha,
+     * sem perder os candles das páginas anteriores.
      *
      * @param reqId ID da página que falhou
      */
@@ -122,10 +148,12 @@ public class DerivHistoryPaginator {
     }
 
     /**
-     * Verifica se o reqId pertence a uma página de paginação em andamento.
+     * Verifica se o {@code reqId} corresponde a uma página de paginação em andamento.
+     * Utilizado pelo {@link com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService}
+     * para rotear a resposta ao handler correto.
      *
-     * @param reqId ID a verificar
-     * @return true se for uma página de paginação
+     * @param reqId ID a ser verificado
+     * @return {@code true} se o ID pertencer a uma página de paginação registrada
      */
     public boolean isPaginatedPage(long reqId) {
         return routesByPageReqId.containsKey(reqId);
@@ -135,6 +163,14 @@ public class DerivHistoryPaginator {
     // Envio de páginas
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Envia uma página de histórico e registra a rota de paginação correspondente.
+     * Quando {@code endEpoch} for nulo, solicita a partir de "latest".
+     *
+     * @param ctx      contexto acumulador da paginação
+     * @param count    quantidade de candles desta página
+     * @param endEpoch epoch do último candle aceito nesta página; nulo para a primeira página
+     */
     private void sendPage(PaginationContext ctx, int count, Long endEpoch) {
         long pageReqId = sendHistoryRequest(
                 ctx.getSymbol(), ctx.getGranularitySeconds(), count, endEpoch);
@@ -142,6 +178,17 @@ public class DerivHistoryPaginator {
         routesByPageReqId.put(pageReqId, new PageRoute(ctx.getParentReqId(), count));
     }
 
+    /**
+     * Monta e envia o payload de requisição de histórico via WebSocket.
+     * Utiliza o campo {@code end: "latest"} na primeira página e o epoch calculado
+     * nas páginas subsequentes para navegar para o passado.
+     *
+     * @param symbol             símbolo do ativo
+     * @param granularitySeconds granularidade dos candles em segundos
+     * @param count              quantidade de candles solicitados nesta página
+     * @param endEpoch           epoch de corte; nulo para solicitar a partir de "latest"
+     * @return ID da requisição gerado pelo {@link DerivRequestSender}
+     */
     private long sendHistoryRequest(
             String symbol,
             int granularitySeconds,
@@ -168,12 +215,27 @@ public class DerivHistoryPaginator {
     // Processamento de páginas
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Entrega os candles de uma requisição simples (sem paginação) diretamente ao callback.
+     * Remove o contexto do mapa após a entrega.
+     *
+     * @param reqId ID da requisição, equivalente ao ID pai neste caso
+     * @param bars  candles recebidos
+     */
     private void deliverSimplePage(long reqId, List<Bar> bars) {
         PaginationContext ctx = contextsByParentReqId.remove(reqId);
         if (ctx == null) return;
         ctx.getOnComplete().accept(ctx.getParentReqId(), List.copyOf(bars));
     }
 
+    /**
+     * Processa uma página dentro de um ciclo de paginação.
+     * Acumula os candles no contexto e decide se deve solicitar mais páginas
+     * ou finalizar a paginação e entregar o resultado completo.
+     *
+     * @param route rota da página recebida, contendo referência ao ID pai
+     * @param bars  candles desta página
+     */
     private void handlePaginatedPage(PageRoute route, List<Bar> bars) {
         long parentReqId = route.parentReqId();
         PaginationContext ctx = contextsByParentReqId.get(parentReqId);
@@ -194,6 +256,16 @@ public class DerivHistoryPaginator {
         finalizePagination(ctx);
     }
 
+    /**
+     * Determina se ainda é necessário buscar mais páginas.
+     * Continua a paginação somente quando ainda há candles restantes,
+     * a página atual veio completa (sem truncamento pela API) e não está vazia.
+     *
+     * @param ctx   contexto acumulador com o total já recebido
+     * @param route rota da página atual com a quantidade solicitada
+     * @param bars  candles recebidos nesta página
+     * @return {@code true} se uma nova página deve ser solicitada
+     */
     private boolean shouldFetchMorePages(
             PaginationContext ctx,
             PageRoute route,
@@ -204,6 +276,13 @@ public class DerivHistoryPaginator {
         return remaining > 0 && receivedFullPage && !bars.isEmpty();
     }
 
+    /**
+     * Solicita a próxima página usando o epoch do candle mais antigo da página atual
+     * como ponto de corte, subtraindo 1 segundo para evitar sobreposição.
+     *
+     * @param ctx  contexto acumulador com o total já recebido
+     * @param bars candles da página atual, usados para extrair o epoch mais antigo
+     */
     private void requestNextPage(PaginationContext ctx, List<Bar> bars) {
         long oldestEpoch = bars.get(0).timestamp().getEpochSecond();
         int remaining = ctx.getTotalRequested() - ctx.size();
@@ -211,6 +290,12 @@ public class DerivHistoryPaginator {
         sendPage(ctx, nextCount, oldestEpoch - 1);
     }
 
+    /**
+     * Finaliza o ciclo de paginação, remove o contexto do mapa e entrega
+     * a lista completa e imutável de candles ao callback do chamador original.
+     *
+     * @param ctx contexto acumulador com todos os candles das páginas recebidas
+     */
     private void finalizePagination(PaginationContext ctx) {
         contextsByParentReqId.remove(ctx.getParentReqId());
 
@@ -227,6 +312,12 @@ public class DerivHistoryPaginator {
     // Utilitários
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Gera um novo ID pai delegando ao {@link DerivRequestSender},
+     * garantindo unicidade global entre todos os IDs de requisição.
+     *
+     * @return novo ID pai para a requisição de histórico
+     */
     private long generateParentReqId() {
         return requestSender.generateReqId();
     }

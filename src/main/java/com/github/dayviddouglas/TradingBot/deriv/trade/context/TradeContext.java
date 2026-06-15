@@ -9,30 +9,30 @@ import java.util.Objects;
  * DTO imutável que encapsula o contexto completo de uma operação de trade.
  *
  * Carrega todos os dados necessários para:
- * - Executar a operação (contractType, amount, currency, duration)
- * - Filtrar por ROI mínimo (minRoiPercent)
- * - Registrar no relatório (decisionMode, strategy, regime, etc.)
+ * - Executar a operação ({@code contractType}, {@code amount}, {@code currency}, {@code duration})
+ * - Filtrar por ROI mínimo ({@code minRoiPercent})
+ * - Registrar no relatório ({@code decisionMode}, {@code strategy}, {@code regime}, etc.)
  *
- * Criado a partir do Signal e do StrategiesProfile antes da execução,
- * eliminando a passagem de múltiplos parâmetros soltos entre métodos.
+ * Construído pelo {@link TradeContextFactory} a partir do {@code Signal} emitido pelo engine
+ * e do {@code StrategiesProfile} do ativo, eliminando a passagem de múltiplos parâmetros
+ * soltos entre os componentes do fluxo de execução.
  *
- * Atualização v5.4:
- * Campo minRoiPercent adicionado para carregar o ROI mínimo configurado
- * por ativo no strategies.json via TradeConfig. Antes o valor era
- * hardcoded em 35.0 no TradeExecutor (SUG-02 implementado).
+ * O canonical constructor aplica validações de não-nulidade nos campos obrigatórios,
+ * garante imutabilidade da lista {@code decisionStrategies} e aplica fallback de
+ * {@code 70.0} para {@code minRoiPercent} quando o valor recebido for inválido.
  *
  * @param symbol             símbolo do ativo
- * @param contractType       tipo de contrato Deriv (CALL ou PUT)
+ * @param contractType       tipo de contrato Deriv: {@code CALL} ou {@code PUT}
  * @param amount             stake normalizado para 2 casas decimais
  * @param currency           moeda do stake
- * @param duration           duração do contrato
- * @param durationUnit       unidade de duração (s, m, h, d)
- * @param decisionMode       modo de decisão usado (VOTING, CONFLUENCE, etc.)
- * @param strategy           nome da estratégia final
+ * @param duration           duração numérica do contrato
+ * @param durationUnit       unidade de duração: {@code s}, {@code m}, {@code h} ou {@code d}
+ * @param decisionMode       modo de decisão utilizado: {@code VOTING}, {@code CONFLUENCE}, etc.
+ * @param strategy           nome da estratégia que gerou o sinal final
  * @param decisionStrategies estratégias que participaram da decisão
- * @param regime             regime de mercado no momento do sinal
- * @param signalType         tipo do sinal original (BUY ou SELL)
- * @param minRoiPercent      ROI mínimo aceitável configurado por ativo
+ * @param regime             regime de mercado confirmado no momento do sinal
+ * @param signalType         tipo do sinal original: {@code BUY} ou {@code SELL}
+ * @param minRoiPercent      ROI mínimo aceitável configurado por ativo no strategies.json
  */
 public record TradeContext(
         String symbol,
@@ -54,6 +54,7 @@ public record TradeContext(
         Objects.requireNonNull(currency,     "currency is required");
         Objects.requireNonNull(signalType,   "signalType is required");
 
+        // Garante lista imutável; substitui null por lista vazia
         decisionStrategies = decisionStrategies != null
                 ? List.copyOf(decisionStrategies)
                 : List.of();

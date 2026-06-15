@@ -12,43 +12,55 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Responsável por enviar requisições à API Deriv e correlacionar respostas.
+ * Responsável por enviar requisições à API Deriv via WebSocket e correlacionar
+ * as respostas assíncronas com os {@link CompletableFuture} registrados pelos chamadores.
  *
- * Extraído do DerivMarketDataService para respeitar SRP:
- * - DerivMarketDataService orquestra e roteia mensagens
- * - DerivRequestSender envia requests e gerencia Futures pendentes
+ * Cada requisição recebe um {@code req_id} único gerado por {@link AtomicLong},
+ * inserido automaticamente no payload antes do envio. Quando a resposta chega,
+ * o {@link com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService} invoca
+ * {@link #complete} com a mensagem, que localiza e completa o Future correspondente.
+ * O Future é removido do mapa automaticamente ao ser completado, seja com sucesso
+ * ou com exceção.
  *
- * Responsabilidades:
- * - Gerar req_id único por requisição
- * - Registrar CompletableFuture por req_id
- * - Completar Futures quando a resposta chegar
- * - Limpar Futures automaticamente após conclusão
- *
- * Thread-safety:
- * - AtomicLong para geração de req_id
- * - ConcurrentHashMap para mapa de Futures pendentes
+ * Dois modos de envio são suportados:
+ * <ul>
+ *   <li>{@link #send}: registra um Future e aguarda a resposta da API</li>
+ *   <li>{@link #sendFireAndForget}: envia sem registrar Future; a resposta
+ *       é tratada via callback registrado externamente</li>
+ * </ul>
  */
 @Component
 public class DerivRequestSender {
 
     private final DerivWsClient wsClient;
     private final ObjectMapper mapper;
+
+    /** Gerador de IDs únicos sequenciais para correlação de requisições e respostas. */
     private final AtomicLong reqIdSeq = new AtomicLong(1000);
+
+    /**
+     * Futures pendentes indexados pelo {@code req_id}.
+     * Cada entrada é removida automaticamente ao ser completada via {@code whenComplete}.
+     */
     private final Map<Long, CompletableFuture<JsonNode>> pendingByReqId =
             new ConcurrentHashMap<>();
 
+    /**
+     * @param wsClient cliente WebSocket utilizado para enviar os payloads serializados
+     * @param mapper   utilizado para criar {@link ObjectNode} vazios via {@link #newPayload}
+     */
     public DerivRequestSender(DerivWsClient wsClient, ObjectMapper mapper) {
         this.wsClient = wsClient;
         this.mapper = mapper;
     }
 
     /**
-     * Envia payload e registra Future para correlação com a resposta.
+     * Envia o payload ao WebSocket e registra um {@link CompletableFuture} para
+     * receber a resposta quando ela chegar. O {@code req_id} é inserido automaticamente
+     * no payload antes do envio.
      *
-     * O req_id é inserido automaticamente no payload antes do envio.
-     *
-     * @param payload ObjectNode com os campos da requisição
-     * @return Future completado quando a resposta chegar
+     * @param payload {@link ObjectNode} com os campos da requisição
+     * @return Future completado com a resposta da API quando disponível
      */
     public CompletableFuture<JsonNode> send(ObjectNode payload) {
         long reqId = nextReqId();
@@ -61,13 +73,13 @@ public class DerivRequestSender {
     }
 
     /**
-     * Envia payload sem aguardar resposta (fire-and-forget).
+     * Envia o payload ao WebSocket sem registrar Future para a resposta.
+     * Utilizado em requisições cujas respostas chegam via callbacks registrados
+     * externamente, como subscrições de ticks e histórico paginado.
+     * O {@code req_id} gerado é retornado para rastreamento externo pelo chamador.
      *
-     * Usado para subscribes onde a resposta chega via callback
-     * registrado no DerivMarketDataService.
-     *
-     * @param payload ObjectNode com os campos da requisição
-     * @return req_id gerado para rastreamento externo
+     * @param payload {@link ObjectNode} com os campos da requisição
+     * @return {@code req_id} gerado e inserido no payload
      */
     public long sendFireAndForget(ObjectNode payload) {
         long reqId = nextReqId();
@@ -77,9 +89,11 @@ public class DerivRequestSender {
     }
 
     /**
-     * Completa o Future pendente correspondente ao req_id da resposta.
+     * Localiza e completa o Future pendente correspondente ao {@code req_id}
+     * extraído da mensagem de resposta recebida pelo WebSocket.
+     * Mensagens sem {@code req_id} válido são ignoradas silenciosamente.
      *
-     * @param msg mensagem de resposta contendo o req_id
+     * @param msg mensagem de resposta recebida via WebSocket contendo o campo {@code req_id}
      */
     public void complete(JsonNode msg) {
         long reqId = msg.path("req_id").asLong(-1);
@@ -92,11 +106,12 @@ public class DerivRequestSender {
     }
 
     /**
-     * Completa o Future pendente com exceção.
-     * Usado quando a API retorna erro para o req_id.
+     * Completa o Future pendente com a exceção informada, propagando o erro
+     * ao chamador que aguarda a resposta. Remove o Future do mapa após a conclusão.
+     * Utilizado quando a API retorna um erro para o {@code req_id} correspondente.
      *
      * @param reqId     ID da requisição que falhou
-     * @param exception exceção a ser propagada ao chamador
+     * @param exception exceção a ser propagada ao chamador via Future
      */
     public void completeExceptionally(long reqId, Exception exception) {
         CompletableFuture<JsonNode> future = pendingByReqId.remove(reqId);
@@ -106,30 +121,30 @@ public class DerivRequestSender {
     }
 
     /**
-     * Verifica se existe Future pendente para o req_id.
+     * Verifica se existe Future pendente aguardando resposta para o {@code req_id} informado.
      *
-     * @param reqId ID da requisição
-     * @return true se existe Future aguardando resposta
+     * @param reqId ID da requisição a ser verificado
+     * @return {@code true} se existir Future registrado para o ID
      */
     public boolean hasPending(long reqId) {
         return pendingByReqId.containsKey(reqId);
     }
 
     /**
-     * Cria ObjectNode vazio para construção de payloads.
+     * Cria um {@link ObjectNode} vazio para construção de payloads de requisição.
      *
-     * @return ObjectNode vazio gerenciado pelo mapper interno
+     * @return {@link ObjectNode} vazio gerenciado pelo {@link ObjectMapper} interno
      */
     public ObjectNode newPayload() {
         return mapper.createObjectNode();
     }
 
     /**
-     * Gera um req_id único sem enviar nenhuma requisição à API.
-     * Usado pelo DerivHistoryPaginator para gerar o parentReqId
-     * de paginação sem disparar request à API.
+     * Gera um {@code req_id} único sem enviar nenhuma requisição à API.
+     * Utilizado pelo {@link DerivHistoryPaginator} para gerar o {@code parentReqId}
+     * de paginação antes de iniciar as páginas individuais.
      *
-     * @return próximo req_id disponível
+     * @return próximo {@code req_id} disponível na sequência
      */
     public long generateReqId() {
         return nextReqId();
@@ -139,10 +154,23 @@ public class DerivRequestSender {
     // Internos
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Incrementa e retorna o próximo {@code req_id} da sequência atômica.
+     *
+     * @return próximo ID único disponível
+     */
     private long nextReqId() {
         return reqIdSeq.getAndIncrement();
     }
 
+    /**
+     * Cria e registra um {@link CompletableFuture} para o {@code req_id} informado.
+     * Configura remoção automática do mapa ao ser completado, com ou sem exceção,
+     * evitando acúmulo de entradas para Futures já resolvidos.
+     *
+     * @param reqId ID da requisição associado ao Future
+     * @return Future registrado e pronto para ser completado pela resposta da API
+     */
     private CompletableFuture<JsonNode> registerFuture(long reqId) {
         CompletableFuture<JsonNode> future = new CompletableFuture<>();
         pendingByReqId.put(reqId, future);

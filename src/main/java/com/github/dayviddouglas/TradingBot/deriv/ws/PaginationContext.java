@@ -8,27 +8,41 @@ import java.util.List;
 import java.util.function.BiConsumer;
 
 /**
- * Contexto de paginação para download de histórico de candles.
+ * Acumulador de estado de uma requisição de histórico de candles que excedeu
+ * o limite por página da API Deriv e requer múltiplas requisições paginadas.
  *
- * Mantém o estado de uma requisição de histórico que excedeu o
- * limite de 1000 candles por requisição da API Deriv.
+ * Mantém as barras recebidas de cada página em uma lista interna compartilhada,
+ * protegida por sincronização, pois as respostas chegam de forma assíncrona
+ * na thread do WebSocket. A paginação navega do presente ao passado, portanto
+ * cada nova página contém candles mais antigos que são inseridos no início
+ * da lista via {@link #prependPage}.
  *
- * Acumula barras de múltiplas páginas e entrega o resultado
- * completo via callback quando a paginação estiver concluída.
- *
- * Os métodos são synchronized para proteger a lista accumulated
- * contra condições de corrida, pois as respostas chegam de forma
- * assíncrona na thread do WebSocket.
+ * Ao concluir todas as páginas, o {@link DerivHistoryPaginator} invoca
+ * {@link #snapshot} para obter a lista ordenada cronologicamente e a entrega
+ * ao callback {@code onComplete} registrado pelo chamador original.
  */
 public class PaginationContext {
 
     private final long parentReqId;
     private final String symbol;
     private final int granularitySeconds;
+
+    /** Quantidade total de candles solicitados pelo chamador original. */
     private final int totalRequested;
+
+    /** Callback invocado com o ID pai e a lista completa ao concluir todas as páginas. */
     private final BiConsumer<Long, List<Bar>> onComplete;
+
+    /** Lista mutável que acumula as barras de todas as páginas recebidas. */
     private final List<Bar> accumulated = new ArrayList<>();
 
+    /**
+     * @param parentReqId        ID pai da requisição de paginação
+     * @param symbol             símbolo do ativo cujo histórico está sendo baixado
+     * @param granularitySeconds granularidade dos candles em segundos
+     * @param totalRequested     quantidade total de candles desejada pelo chamador
+     * @param onComplete         callback invocado ao finalizar todas as páginas
+     */
     public PaginationContext(
             long parentReqId,
             String symbol,
@@ -44,30 +58,33 @@ public class PaginationContext {
     }
 
     /**
-     * Insere barras no início da lista acumulada.
+     * Insere as barras da página recebida no início da lista acumulada.
+     * Como a paginação navega do presente ao passado, cada nova página contém
+     * candles mais antigos que devem preceder os já acumulados.
      *
-     * A paginação vai do presente ao passado, então cada nova página
-     * contém candles mais antigos que devem ser inseridos no início.
-     *
-     * @param pageBars barras da página recebida
+     * @param pageBars candles recebidos na página atual
      */
     public synchronized void prependPage(List<Bar> pageBars) {
         accumulated.addAll(0, pageBars);
     }
 
     /**
-     * Retorna a quantidade de barras acumuladas até o momento.
+     * Retorna a quantidade de candles acumulados até o momento.
+     * Utilizado pelo {@link DerivHistoryPaginator} para calcular quantos
+     * candles ainda precisam ser solicitados.
      *
-     * @return tamanho do histórico acumulado
+     * @return total de candles acumulados
      */
     public synchronized int size() {
         return accumulated.size();
     }
 
     /**
-     * Retorna cópia imutável e ordenada cronologicamente do histórico acumulado.
+     * Retorna uma cópia imutável dos candles acumulados, ordenada cronologicamente
+     * por timestamp. Chamado pelo {@link DerivHistoryPaginator} ao finalizar a paginação
+     * ou ao entregar resultado parcial em caso de erro.
      *
-     * @return lista imutável de barras ordenadas por timestamp
+     * @return lista imutável de candles ordenados do mais antigo ao mais recente
      */
     public synchronized List<Bar> snapshot() {
         List<Bar> sorted = new ArrayList<>(accumulated);

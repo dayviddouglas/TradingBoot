@@ -14,35 +14,39 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 
 /**
- * Serviço responsável por obter o OTP da API REST da Deriv.
+ * Responsável por obter a URI WebSocket autenticada da API REST da Deriv
+ * via troca do Personal Access Token (PAT) por um OTP de uso único.
  *
- * Correção v5.3.1:
- * Adicionado retry automático com backoff para o erro 429
- * (rate limiting do Cloudflare — error code 1015).
- * O retry aguarda intervalos crescentes antes de tentar novamente,
- * respeitando o limite de requisições da API.
+ * O OTP é obtido via {@code POST} ao endpoint
+ * {@code /trading/v1/options/accounts/{accountId}/otp}, utilizando o PAT
+ * como Bearer no header {@code Authorization} e o App ID no header {@code Deriv-App-ID}.
+ * A resposta contém a URI WebSocket com o OTP embutido, pronta para conexão autenticada.
+ *
+ * Implementa retry automático com backoff crescente para o código HTTP {@code 429},
+ * gerado pelo rate limiting do Cloudflare (error code 1015). Os intervalos de espera
+ * seguem a sequência definida em {@link #RETRY_DELAYS_MS}, crescendo progressivamente
+ * até o limite de {@value MAX_RETRIES} tentativas.
  */
 @Service
 public class DerivOtpService {
 
-
     private static final Logger log =
             LoggerFactory.getLogger(DerivOtpService.class);
 
+    /** URL base da API REST da Deriv. */
     private static final String BASE_URL =
             "https://api.derivws.com";
 
+    /** Timeout aplicado tanto na conexão quanto em cada requisição HTTP. */
     private static final Duration REQUEST_TIMEOUT =
             Duration.ofSeconds(15);
 
-    /**
-     * Máximo de tentativas antes de desistir.
-     */
+    /** Número máximo de tentativas antes de lançar {@link IllegalStateException}. */
     private static final int MAX_RETRIES = 5;
 
     /**
-     * Delays entre tentativas em milissegundos.
-     * Crescente para respeitar o rate limit do Cloudflare.
+     * Delays em milissegundos entre tentativas consecutivas.
+     * Cresce progressivamente para respeitar o rate limit do Cloudflare.
      */
     private static final long[] RETRY_DELAYS_MS = {
             5_000,   // 5s
@@ -56,6 +60,10 @@ public class DerivOtpService {
     private final ObjectMapper    mapper;
     private final HttpClient      httpClient;
 
+    /**
+     * @param props  propriedades da Deriv: {@code accountId}, {@code accessToken} e {@code appId}
+     * @param mapper utilizado para deserializar a resposta JSON e extrair a URL do WebSocket
+     */
     public DerivOtpService(
             DerivProperties props,
             ObjectMapper mapper
@@ -68,10 +76,14 @@ public class DerivOtpService {
     }
 
     /**
-     * Obtém o OTP da API REST com retry automático para 429.
+     * Obtém a URI WebSocket autenticada com OTP via chamada REST à API da Deriv.
+     * Em caso de resposta {@code 429}, aguarda o intervalo configurado e retenta.
+     * Qualquer outro código de erro HTTP não realiza retry e lança exceção imediatamente.
+     * Erros de I/O ou timeout realizam retry com o mesmo backoff.
      *
-     * @return URI do WebSocket autenticado com OTP embutido
-     * @throws IllegalStateException se todas as tentativas falharem
+     * @return URI do WebSocket com OTP embutido, pronta para conexão autenticada
+     * @throws IllegalStateException se todas as {@value MAX_RETRIES} tentativas falharem,
+     *                               se a resposta não contiver a URL ou se a thread for interrompida
      */
     public URI fetchWsUri() {
         String accountId   = props.getAccountId();
@@ -108,12 +120,11 @@ public class DerivOtpService {
                 log.info("OTP RESPONSE | status={} | attempt={}",
                         status, attempt);
 
-                // Sucesso
                 if (status == 200) {
                     return parseWsUri(response.body());
                 }
 
-                // Rate limit — aguarda e tenta novamente
+                // Rate limit do Cloudflare — aguarda o intervalo configurado e retenta
                 if (status == 429) {
                     long delayMs = RETRY_DELAYS_MS[
                             Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
@@ -128,7 +139,7 @@ public class DerivOtpService {
                     }
                 }
 
-                // Outro erro HTTP — não faz retry
+                // Qualquer outro código HTTP é tratado como falha definitiva sem retry
                 throw new IllegalStateException(
                         "OTP request failed | status=" + status
                                 + " | body=" + response.body());
@@ -144,6 +155,7 @@ public class DerivOtpService {
                 log.warn("OTP REQUEST ERROR | attempt={}/{} | error={}",
                         attempt, MAX_RETRIES, e.getMessage());
 
+                // Aguarda o intervalo de backoff antes da próxima tentativa
                 if (attempt < MAX_RETRIES) {
                     long delayMs = RETRY_DELAYS_MS[
                             Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
@@ -164,7 +176,13 @@ public class DerivOtpService {
     }
 
     /**
-     * Parseia o corpo da resposta e extrai a URI do WebSocket.
+     * Deserializa o corpo da resposta HTTP e extrai a URI WebSocket do campo {@code data.url}.
+     * O OTP é mascarado no log para não expor o token autenticado.
+     *
+     * @param responseBody corpo JSON da resposta HTTP com status {@code 200}
+     * @return URI do WebSocket com OTP embutido
+     * @throws IllegalStateException se o campo {@code data.url} estiver ausente ou em branco,
+     *                               ou se o JSON não puder ser deserializado
      */
     private URI parseWsUri(String responseBody) {
         try {
@@ -177,6 +195,7 @@ public class DerivOtpService {
                                 + "body=" + responseBody);
             }
 
+            // OTP mascarado no log para não expor o token autenticado
             log.info("OTP WS URL OBTAINED | url={}",
                     wsUrl.replaceAll("otp=[^&]+", "otp=***"));
 

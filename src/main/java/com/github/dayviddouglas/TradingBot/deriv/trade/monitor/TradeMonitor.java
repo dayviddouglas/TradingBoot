@@ -15,39 +15,52 @@ import java.time.Instant;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Responsável pelo monitoramento de contratos abertos e registro do resultado.
+ * Responsável pelo monitoramento de contratos abertos e pelo registro do resultado
+ * no {@link TradeReportService}.
  *
- * Responsabilidades:
- * - Subscrever stream de atualizações do contrato aberto
- * - Iniciar watchdog como fallback preventivo
- * - Processar fechamento do contrato (via stream ou watchdog)
- * - Registrar resultado no TradeReportService
- * - Cancelar subscription e resetar estado do ativo
+ * Após a compra de um contrato pelo {@code TradeExecutor}, este componente:
+ * <ol>
+ *   <li>Subscreve o stream de atualizações do contrato via {@code proposal_open_contract}</li>
+ *   <li>Inicia um watchdog em virtual thread como fallback para casos em que o stream
+ *       não entregue o fechamento</li>
+ *   <li>Processa o fechamento quando {@code is_sold == 1} é detectado por qualquer um dos dois</li>
+ *   <li>Registra o resultado no {@link TradeReportService} e reseta o {@link TradeState} para IDLE</li>
+ * </ol>
  *
- * Correção v5.1:
- * O método findStateByContractId() chamava claimClosedContract() de forma
- * prematura, removendo o contrato do registry antes de confirmar is_sold == 1.
- * Isso fazia com que o fechamento real do contrato nunca fosse processado,
- * pois quando is_sold chegava como 1, o contrato já havia sido removido
- * do registry e findStateByContractId() retornava null.
+ * O processamento de fechamento é protegido por {@link TradeStateRegistry#claimClosedContract},
+ * que garante atomicidade: apenas o primeiro a chamar claim processa o resultado,
+ * evitando duplicidade entre stream e watchdog.
  *
- * A correção separa a verificação de existência (isPendingClose) do claim:
- * - isPendingClose(): apenas verifica se o contrato existe no registry
- * - claimClosedContract(): chamado SOMENTE após confirmar is_sold == 1
+ * A separação entre {@link TradeStateRegistry#isPendingClose} e
+ * {@link TradeStateRegistry#claimClosedContract} é intencional:
+ * {@code isPendingClose} apenas verifica existência sem remover o contrato do registry,
+ * enquanto {@code claimClosedContract} é chamado exclusivamente após confirmar
+ * {@code is_sold == 1}, garantindo que o state permaneça acessível para leitura
+ * até a confirmação real do fechamento.
  */
 @Component
 public class TradeMonitor {
 
     private static final Logger log = LoggerFactory.getLogger(TradeMonitor.class);
 
+    /** Tempo adicional aguardado após a duração esperada do contrato antes de ativar o watchdog. */
     private static final Duration CLOSE_GRACE = Duration.ofSeconds(75);
+
+    /** Intervalo entre cada poll do watchdog ao endpoint de contrato aberto. */
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(10);
+
+    /** Número máximo de polls realizados pelo watchdog antes de encerrar. */
     private static final int POLL_ATTEMPTS = 6;
 
     private final DerivMarketDataService marketDataService;
     private final TradeReportService tradeReportService;
     private final TradeStateRegistry registry;
 
+    /**
+     * @param marketDataService  utilizado para subscrever o stream e consultar o contrato via poll
+     * @param tradeReportService utilizado para registrar o resultado da operação
+     * @param registry           gerencia os estados de contratos abertos por ativo
+     */
     public TradeMonitor(
             DerivMarketDataService marketDataService,
             TradeReportService tradeReportService,
@@ -60,9 +73,10 @@ public class TradeMonitor {
 
     /**
      * Inicia o monitoramento de um contrato recém-comprado.
+     * Subscreve o stream WebSocket e inicia o watchdog em paralelo em virtual thread.
      *
-     * @param state   estado do ativo com contexto da operação
-     * @param context contexto completo da operação
+     * @param state   estado do ativo com o contractId e contexto da operação
+     * @param context contexto completo da operação, utilizado para calcular o tempo de espera do watchdog
      */
     public void startMonitoring(TradeState state, TradeContext context) {
         long contractId = state.getContractId();
@@ -72,18 +86,22 @@ public class TradeMonitor {
     }
 
     /**
-     * Callback registrado no DerivMarketDataService para receber
-     * atualizações de contratos abertos via stream WebSocket.
+     * Callback registrado no {@link DerivMarketDataService} para receber atualizações
+     * de contratos abertos via stream WebSocket.
      *
-     * Fluxo corrigido:
-     * 1. Extrai contractId da mensagem
-     * 2. Verifica se o contrato existe no registry (isPendingClose)
-     * 3. Captura subscriptionId para cancelamento futuro
-     * 4. Verifica is_sold == 1
-     * 5. SOMENTE ENTÃO faz o claim e processa o fechamento
+     * Fluxo de processamento:
+     * <ol>
+     *   <li>Extrai o {@code contractId} da mensagem</li>
+     *   <li>Verifica se o contrato ainda está pendente no registry via {@code isPendingClose}
+     *       sem removê-lo</li>
+     *   <li>Captura o {@code subscriptionId} da mensagem para uso no cancelamento posterior</li>
+     *   <li>Verifica se {@code is_sold == 1} — apenas então prossegue</li>
+     *   <li>Realiza o claim atômico via {@code claimClosedContract}; se retornar null,
+     *       o watchdog já processou primeiro e esta chamada é descartada</li>
+     *   <li>Processa o fechamento e registra o resultado</li>
+     * </ol>
      *
-     * A separação entre isPendingClose() e claimClosedContract() garante
-     * que o contrato só é removido do registry quando o fechamento é real.
+     * @param msg mensagem JSON recebida via stream WebSocket
      */
     public void handleStreamUpdate(JsonNode msg) {
         try {
@@ -93,18 +111,16 @@ public class TradeMonitor {
             long contractId = poc.path("contract_id").asLong(-1);
             if (contractId <= 0) return;
 
-            // Verifica existência sem remover do registry
+            // Verifica existência no registry sem remover — o state permanece acessível
             if (!registry.isPendingClose(contractId)) return;
 
-            // Captura subscription ID para uso no cancelamento posterior
-            // O state ainda está no registry neste ponto
+            // Captura o subscriptionId enquanto o state ainda está no registry
             captureSubscriptionIdFromMsg(contractId, msg);
 
-            // Verifica se o contrato realmente fechou
+            // Aguarda is_sold == 1 antes de qualquer remoção do registry
             if (!isContractSold(poc)) return;
 
-            // SOMENTE AQUI faz o claim — remove do registry de forma atômica
-            // Se retornar null, o watchdog já processou primeiro
+            // Claim atômico — garante que somente stream ou watchdog processará o fechamento
             TradeState state = registry.claimClosedContract(contractId);
             if (state == null) return;
 
@@ -121,6 +137,10 @@ public class TradeMonitor {
     // Stream
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Envia o request de subscrição do stream {@code proposal_open_contract}
+     * para o contrato informado e aguarda o acknowledge da API.
+     */
     private void subscribeContractStream(TradeState state, long contractId) {
         try {
             JsonNode ack = marketDataService.subscribeOpenContract(contractId).join();
@@ -134,24 +154,30 @@ public class TradeMonitor {
     }
 
     /**
-     * Captura o subscriptionId da mensagem e registra no TradeState
-     * sem precisar extrair o state do registry.
+     * Extrai o {@code subscriptionId} da mensagem recebida e o registra no {@link TradeState}
+     * correspondente, consultando o registry sem realizar claim.
+     * O {@code subscriptionId} é necessário para cancelar o stream após o fechamento do contrato.
      *
-     * Busca o state diretamente pelo contractId no registry sem claim.
-     * Isso é seguro porque o state ainda não foi removido neste ponto.
+     * @param contractId identificador do contrato para localizar o state no registry
+     * @param msg        mensagem JSON com o campo {@code subscription.id}
      */
     private void captureSubscriptionIdFromMsg(long contractId, JsonNode msg) {
         String subscriptionId = msg.path("subscription").path("id").asText("");
         if (subscriptionId.isBlank()) return;
 
-        // Acessa o state via registry sem removê-lo
-        // getStateByContractId() apenas consulta, não remove
+        // Consulta o state sem removê-lo — getStateByContractId não realiza claim
         TradeState state = registry.getStateByContractId(contractId);
         if (state != null) {
             state.setSubscriptionId(subscriptionId);
         }
     }
 
+    /**
+     * Verifica se o contrato foi efetivamente vendido/fechado pela API.
+     *
+     * @param poc nó JSON do {@code proposal_open_contract}
+     * @return {@code true} se {@code is_sold} for igual a {@code 1}
+     */
     private boolean isContractSold(JsonNode poc) {
         return poc.path("is_sold").asInt(0) == 1;
     }
@@ -160,6 +186,12 @@ public class TradeMonitor {
     // Watchdog
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Inicia o watchdog em uma virtual thread separada.
+     * O watchdog aguarda a duração esperada do contrato acrescida de {@link #CLOSE_GRACE}
+     * antes de começar a realizar polls ao endpoint de contrato aberto.
+     * Quando a duração do contrato não puder ser convertida, utiliza 20 minutos como fallback.
+     */
     private void startWatchdog(TradeState state, long contractId,
                                int duration, String durationUnit) {
         Duration expectedDuration = toDuration(duration, durationUnit);
@@ -172,10 +204,17 @@ public class TradeMonitor {
                 runWatchdog(state, contractId, waitTime));
     }
 
+    /**
+     * Lógica principal do watchdog executada em virtual thread.
+     * Após o tempo de espera inicial, verifica se o contrato ainda está pendente
+     * e realiza até {@value POLL_ATTEMPTS} polls com intervalo de {@link #POLL_INTERVAL}.
+     * Encerra silenciosamente se o stream já tiver processado o fechamento.
+     */
     private void runWatchdog(TradeState state, long contractId,
                              Duration waitTime) {
         sleepSilently(waitTime.toMillis());
 
+        // Se o stream já processou o fechamento, o contrato não estará mais no registry
         if (!registry.isPendingClose(contractId)) return;
 
         log.info("WATCHDOG ACTIVATED | symbol={} | contract_id={}",
@@ -194,6 +233,16 @@ public class TradeMonitor {
                 state.getSymbol(), contractId);
     }
 
+    /**
+     * Realiza um único poll ao endpoint de contrato aberto e processa o fechamento
+     * se {@code is_sold == 1} for detectado. Utiliza claim atômico para garantir
+     * que stream e watchdog não processem o mesmo fechamento.
+     *
+     * @param state      estado do ativo monitorado
+     * @param contractId identificador do contrato
+     * @param attempt    número da tentativa atual, utilizado apenas para log
+     * @return {@code true} se o fechamento foi detectado e processado
+     */
     private boolean pollContractOnce(TradeState state, long contractId,
                                      int attempt) {
         try {
@@ -224,6 +273,16 @@ public class TradeMonitor {
     // Processamento de fechamento
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Processa o fechamento confirmado de um contrato.
+     * Calcula lucro, resultado (WIN/LOSS), duração real e delega o registro
+     * ao {@link TradeReportService}. Cancela o stream e reseta o estado para IDLE.
+     *
+     * @param poc    nó JSON do {@code proposal_open_contract} com dados do fechamento
+     * @param fullMsg mensagem completa, utilizada para extrair o subscriptionId
+     * @param state  state reivindicado atomicamente via claim
+     * @param source identificador da origem do fechamento: {@code "STREAM"} ou {@code "WATCHDOG"}
+     */
     private void processClosedContract(JsonNode poc, JsonNode fullMsg,
                                        TradeState state, String source) {
         long contractId = poc.path("contract_id").asLong(-1);
@@ -246,16 +305,33 @@ public class TradeMonitor {
         state.resetToIdle();
     }
 
+    /**
+     * Retorna o timestamp de entrada registrado no {@link TradeState},
+     * ou o timestamp de saída como fallback quando a entrada não estiver disponível.
+     */
     private Instant resolveEntryTimestamp(TradeState state, Instant fallback) {
         return state.getEntryTimestamp() != null
                 ? state.getEntryTimestamp()
                 : fallback;
     }
 
+    /**
+     * Determina o resultado da operação com base no lucro apurado.
+     * Considera WIN somente quando o lucro for finito e positivo.
+     *
+     * @param profit lucro apurado pela API; pode ser negativo ou {@code NaN}
+     * @return {@code "WIN"} ou {@code "LOSS"}
+     */
     private String resolveResult(double profit) {
         return (Double.isFinite(profit) && profit > 0) ? "WIN" : "LOSS";
     }
 
+    /**
+     * Constrói o {@link TradeReportEntry} com todos os dados da operação encerrada
+     * e delega o registro ao {@link TradeReportService}.
+     * O ROI real é calculado como {@code profit / stake * 100}.
+     * A duração real é calculada em minutos a partir dos timestamps de entrada e saída.
+     */
     private void recordTradeResult(TradeState state, long contractId,
                                    double profit, Instant entryTimestamp,
                                    Instant exitTimestamp, String result) {
@@ -290,6 +366,12 @@ public class TradeMonitor {
         ));
     }
 
+    /**
+     * Cancela o stream {@code proposal_open_contract} via {@code forget}.
+     * O {@code subscriptionId} é resolvido primeiro pelo {@link TradeState}
+     * e, como fallback, extraído da mensagem completa recebida via stream.
+     * Erros no cancelamento são tolerados, pois o contrato já foi fechado.
+     */
     private void cancelSubscription(TradeState state, JsonNode fullMsg) {
         String subscriptionId = resolveSubscriptionId(state, fullMsg);
         if (subscriptionId == null || subscriptionId.isBlank()) return;
@@ -297,10 +379,14 @@ public class TradeMonitor {
         try {
             marketDataService.forget(subscriptionId);
         } catch (Exception ignored) {
-            // Contrato já fechou, erro no forget é tolerado
+            // Contrato já fechou — falha no forget não compromete o resultado registrado
         }
     }
 
+    /**
+     * Resolve o {@code subscriptionId} prioritariamente pelo {@link TradeState},
+     * com fallback para o campo {@code subscription.id} da mensagem recebida.
+     */
     private String resolveSubscriptionId(TradeState state, JsonNode fullMsg) {
         String fromState = state.getSubscriptionId();
         if (fromState != null && !fromState.isBlank()) return fromState;
@@ -311,6 +397,14 @@ public class TradeMonitor {
     // Utilitários
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Converte a duração e unidade configuradas para um {@link Duration}.
+     * Retorna {@code null} quando a unidade não for reconhecida.
+     *
+     * @param duration valor numérico da duração
+     * @param unit     unidade de duração: {@code s}, {@code m}, {@code h} ou {@code d}
+     * @return {@link Duration} correspondente ou {@code null}
+     */
     private Duration toDuration(int duration, String unit) {
         if (unit == null) return null;
         return switch (unit.trim()) {
@@ -322,6 +416,12 @@ public class TradeMonitor {
         };
     }
 
+    /**
+     * Aguarda o tempo informado em milissegundos, restaurando o flag de interrupção
+     * da thread caso o sleep seja interrompido.
+     *
+     * @param millis tempo de espera em milissegundos
+     */
     private void sleepSilently(long millis) {
         try {
             Thread.sleep(millis);

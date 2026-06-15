@@ -6,26 +6,25 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Registro centralizado dos estados operacionais por ativo e por contrato.
+ * Registro centralizado dos estados operacionais de trades, indexados por símbolo e por contrato.
  *
- * Responsabilidades:
- * - Criar e armazenar TradeState por símbolo (um por ativo)
- * - Manter mapeamento reverso contractId → TradeState
- * - Garantir que stream e watchdog não processem o mesmo fechamento duas vezes
+ * Mantém dois mapas complementares:
+ * <ul>
+ *   <li>{@code statesBySymbol}: garante que cada ativo tenha no máximo um {@link TradeState},
+ *       criado sob demanda via {@link #getOrCreate}</li>
+ *   <li>{@code statesByContractId}: mapeamento reverso que permite ao {@link TradeMonitor}
+ *       localizar o estado de um ativo a partir do {@code contract_id} reportado
+ *       pelo stream WebSocket ou pelo watchdog</li>
+ * </ul>
  *
- * Correção v5.1:
- * Adicionado método getStateByCon
+ * O mecanismo de processamento único de fechamento é garantido pelo método
+ * {@link #claimClosedContract}, que remove o estado do mapa {@code statesByContractId}
+ * de forma atômica via {@link ConcurrentHashMap#remove}. Apenas o primeiro chamador
+ * (stream ou watchdog) recebe o estado; o segundo recebe {@code null} e descarta
+ * o processamento, evitando duplicidade no relatório.
  *
- * tractId() que consulta o state pelo
- * contractId sem removê-lo do registry. Necessário para que o TradeMonitor
- * possa capturar o subscriptionId das mensagens de stream antes de
- * confirmar is_sold == 1, sem interferir no mecanismo de claim atômico
- * que garante processamento único do fechamento.
- *
- * Diferença entre os métodos de acesso por contractId:
- * - getStateByContractId(): apenas consulta, não remove (leitura)
- * - claimClosedContract(): remove atomicamente (escrita exclusiva)
- * - isPendingClose(): verifica existência sem remover (leitura)
+ * Os métodos {@link #getStateByContractId} e {@link #isPendingClose} apenas consultam
+ * o mapa sem remover o estado, sendo seguros para uso anterior à confirmação de fechamento.
  */
 @Component
 public class TradeStateRegistry {
@@ -37,27 +36,30 @@ public class TradeStateRegistry {
     private final Map<String, TradeState> statesBySymbol = new ConcurrentHashMap<>();
 
     /**
-     * Mapeamento reverso: contractId → TradeState.
+     * Mapeamento reverso: {@code contractId → TradeState}.
      * Necessário para localizar o estado quando stream ou watchdog
-     * reportam o fechamento de um contrato pelo contract_id.
+     * reportam o fechamento de um contrato pelo {@code contract_id}.
      */
     private final Map<Long, TradeState> statesByContractId = new ConcurrentHashMap<>();
 
     /**
-     * Retorna o estado do ativo, criando-o se não existir.
+     * Retorna o estado operacional do ativo, criando-o se ainda não existir.
+     * O estado criado é reutilizado em todas as operações subsequentes do mesmo ativo.
      *
      * @param symbol símbolo do ativo
-     * @return estado operacional do ativo
+     * @return estado operacional existente ou recém-criado
      */
     public TradeState getOrCreate(String symbol) {
         return statesBySymbol.computeIfAbsent(symbol, TradeState::new);
     }
 
     /**
-     * Registra a associação entre um contrato e o estado do ativo.
-     * Chamado após buy bem-sucedido.
+     * Registra a associação entre o contrato comprado e o estado do ativo.
+     * Chamado pelo {@link com.github.dayviddouglas.TradingBot.deriv.DerivTradeService}
+     * imediatamente após buy bem-sucedido, habilitando a localização do estado
+     * pelo {@code contractId} no stream e no watchdog.
      *
-     * @param contractId ID do contrato comprado
+     * @param contractId ID do contrato retornado pela API após o buy
      * @param state      estado do ativo correspondente
      */
     public void registerContract(long contractId, TradeState state) {
@@ -66,39 +68,37 @@ public class TradeStateRegistry {
 
     /**
      * Consulta o estado associado ao contrato sem removê-lo do registry.
+     * Utilizado pelo {@link TradeMonitor} para capturar o {@code subscriptionId}
+     * das mensagens de stream antes de confirmar {@code is_sold == 1},
+     * sem interferir no mecanismo de claim atômico.
      *
-     * Usado pelo TradeMonitor para capturar o subscriptionId das mensagens
-     * de stream antes de confirmar is_sold == 1. Diferente de
-     * claimClosedContract(), este método não interfere no mecanismo
-     * de claim atômico — o contrato permanece no registry após a consulta.
-     *
-     * @param contractId ID do contrato
-     * @return estado do ativo ou null se não encontrado
+     * @param contractId ID do contrato a ser consultado
+     * @return estado do ativo ou {@code null} se não encontrado
      */
     public TradeState getStateByContractId(long contractId) {
         return statesByContractId.get(contractId);
     }
 
     /**
-     * Remove e retorna o estado associado ao contrato.
-     *
-     * A remoção atômica via remove() garante que apenas uma fonte
-     * (stream OU watchdog) processe o fechamento do contrato.
-     * Se retornar null, outra fonte já processou.
+     * Remove e retorna atomicamente o estado associado ao contrato.
+     * A remoção via {@link ConcurrentHashMap#remove} garante que apenas
+     * um chamador — stream ou watchdog — processe o fechamento.
+     * Quando retornar {@code null}, o fechamento já foi processado pelo outro.
      *
      * @param contractId ID do contrato fechado
-     * @return estado do ativo ou null se já processado
+     * @return estado do ativo reivindicado, ou {@code null} se já processado
      */
     public TradeState claimClosedContract(long contractId) {
         return statesByContractId.remove(contractId);
     }
 
     /**
-     * Verifica se existe estado registrado para o contrato.
-     * Usado pelo watchdog para verificar se o stream já resolveu.
+     * Verifica se ainda existe estado registrado para o contrato,
+     * sem removê-lo do registry. Utilizado pelo watchdog para verificar
+     * se o stream já processou o fechamento antes de iniciar os polls.
      *
-     * @param contractId ID do contrato
-     * @return true se ainda aguarda processamento
+     * @param contractId ID do contrato a ser verificado
+     * @return {@code true} se o contrato ainda aguarda processamento de fechamento
      */
     public boolean isPendingClose(long contractId) {
         return statesByContractId.containsKey(contractId);

@@ -12,16 +12,23 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-
 /**
- * Monitora a chegada de ticks para confirmar que a conexão está funcional.
+ * Monitora a chegada de ticks em tempo real para confirmar que a conexão WebSocket
+ * está funcional e recebendo dados do mercado.
  *
- * Um WebSocket tecnicamente conectado pode estar sem receber dados
- * por falha na autorização, subscrição ou problema de rede silencioso.
- * O TickHeartbeat detecta essa situação rastreando o último tick recebido.
+ * Um WebSocket tecnicamente conectado pode estar em estado silencioso por falha
+ * na autorização, subscrição ou problema de rede sem sinalização de erro.
+ * Este componente detecta essa situação rastreando o timestamp do último tick recebido
+ * e acionando um callback configurável quando o silêncio exceder o limiar definido
+ * em {@link #TICK_TIMEOUT}.
  *
- * Não bloqueia nenhuma thread: a verificação ocorre em background
- * via ScheduledExecutorService com intervalo configurado.
+ * A verificação ocorre em background a cada {@link #CHECK_INTERVAL} via
+ * {@link ScheduledExecutorService} em thread daemon, sem bloquear nenhuma thread do sistema.
+ * O callback de timeout é executado em virtual thread para não bloquear o scheduler
+ * e permitir que as verificações subsequentes ocorram normalmente durante a reconexão.
+ *
+ * O timeout é dimensionado em 3 minutos para tolerar períodos de mercado fechado
+ * (fins de semana, feriados) sem gerar falsos positivos de reconexão.
  */
 @Component
 public class TickHeartbeat {
@@ -29,26 +36,28 @@ public class TickHeartbeat {
     private static final Logger log = LoggerFactory.getLogger(TickHeartbeat.class);
 
     /**
-     * 3 minutos porque mercados fechados (fins de semana, feriados)
-     * ficam longos períodos sem emitir ticks, e não devem ser
-     * interpretados como falha de conexão.
+     * Silêncio máximo tolerado antes de considerar a conexão inativa.
+     * Definido em 3 minutos para tolerar períodos de mercado fechado sem
+     * interpretar a ausência de ticks como falha de conexão.
      */
     private static final Duration TICK_TIMEOUT = Duration.ofMinutes(3);
 
     /**
-     * 30 segundos porque mercados ativos emitem ticks com frequência
-     * muito maior, tornando qualquer silêncio rapidamente detectável.
+     * Intervalo entre cada verificação periódica de chegada de ticks.
+     * Definido em 30 segundos, pois mercados ativos emitem ticks com
+     * frequência muito maior, tornando qualquer silêncio rapidamente detectável.
      */
     private static final Duration CHECK_INTERVAL = Duration.ofSeconds(30);
 
     /**
-     * AtomicReference garante visibilidade do timestamp entre a thread
-     * do WebSocket (que grava) e a thread do heartbeat (que lê).
+     * Timestamp do último tick recebido. {@link AtomicReference} garante
+     * visibilidade entre a thread do WebSocket (que grava) e a thread do
+     * scheduler (que lê) sem necessidade de sincronização explícita.
      */
     private final AtomicReference<Instant> lastTickAt = new AtomicReference<>();
 
     /**
-     * Thread daemon para não impedir o shutdown da JVM
+     * Scheduler em thread daemon para não impedir o shutdown da JVM
      * quando a aplicação for encerrada normalmente.
      */
     private final ScheduledExecutorService scheduler = Executors
@@ -59,31 +68,33 @@ public class TickHeartbeat {
             });
 
     private ScheduledFuture<?> monitorTask;
+
+    /** Callback acionado quando o silêncio de ticks exceder {@link #TICK_TIMEOUT}. */
     private Runnable onTickTimeout;
 
     /**
-     * Registra o recebimento de um tick.
-     * Chamado pelo DerivMarketDataService a cada tick recebido.
+     * Registra a chegada de um tick, atualizando o timestamp de referência.
+     * Invocado pelo {@link com.github.dayviddouglas.TradingBot.deriv.DerivMarketDataService}
+     * a cada tick recebido da API Deriv.
      */
     public void recordTick() {
         lastTickAt.set(Instant.now());
     }
 
     /**
-     * Registra callback chamado quando o timeout de ticks expira.
+     * Registra o callback a ser executado quando o timeout de ticks for detectado.
+     * Normalmente configurado para acionar o fluxo de reconexão do bot.
      *
-     * @param callback ação a executar quando ticks pararem de chegar
+     * @param callback ação executada em virtual thread ao detectar ausência de ticks
      */
     public void onTickTimeout(Runnable callback) {
         this.onTickTimeout = callback;
     }
 
     /**
-     * Inicia o monitoramento periódico em background.
-     * Chamado após cada conexão bem-sucedida.
-     *
-     * stopMonitoring() é chamado antes para cancelar qualquer
-     * tarefa anterior e evitar monitoramentos duplicados.
+     * Inicia o monitoramento periódico de chegada de ticks em background.
+     * Cancela qualquer tarefa anterior antes de agendar uma nova,
+     * evitando monitoramentos duplicados após reconexões.
      */
     public void startMonitoring() {
         stopMonitoring();
@@ -100,8 +111,8 @@ public class TickHeartbeat {
     }
 
     /**
-     * Para o monitoramento de ticks.
-     * Chamado antes de cada reconexão para evitar verificações
+     * Para o monitoramento periódico de ticks.
+     * Invocado antes de cada reconexão para evitar verificações
      * durante o período em que a conexão está sendo restabelecida.
      */
     public void stopMonitoring() {
@@ -111,9 +122,10 @@ public class TickHeartbeat {
     }
 
     /**
-     * Reseta o timestamp do último tick para null.
-     * Necessário antes de cada reconexão para evitar que o timestamp
-     * da conexão anterior seja usado como referência na nova conexão.
+     * Reseta o timestamp do último tick para {@code null}.
+     * Invocado antes de cada reconexão para evitar que o timestamp
+     * da sessão anterior seja usado como referência na nova conexão,
+     * o que poderia suprimir a detecção de silêncio legítimo.
      */
     public void reset() {
         lastTickAt.set(null);
@@ -121,9 +133,9 @@ public class TickHeartbeat {
     }
 
     /**
-     * Verifica se ticks estão chegando dentro do timeout configurado.
+     * Verifica se ticks estão chegando dentro do intervalo de timeout configurado.
      *
-     * @return true se a conexão está recebendo ticks ativamente
+     * @return {@code true} se o último tick foi recebido há menos de {@link #TICK_TIMEOUT}
      */
     public boolean isAlive() {
         Instant last = lastTickAt.get();
@@ -134,7 +146,7 @@ public class TickHeartbeat {
     /**
      * Retorna o timestamp do último tick recebido.
      *
-     * @return Instant do último tick ou null se nenhum tick foi recebido
+     * @return {@link Instant} do último tick ou {@code null} se nenhum tick foi recebido ainda
      */
     public Instant getLastTickAt() {
         return lastTickAt.get();
@@ -145,14 +157,11 @@ public class TickHeartbeat {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Verifica se ticks estão chegando e aciona o callback se necessário.
-     *
-     * Retorna silenciosamente se nenhum tick foi recebido ainda,
-     * pois pode ser o período inicial logo após a subscrição.
-     *
-     * O callback é executado em virtual thread para não bloquear
-     * o scheduler e permitir que as próximas verificações ocorram
-     * normalmente enquanto a reconexão é processada.
+     * Executa uma verificação de chegada de ticks.
+     * Quando nenhum tick foi recebido ainda, retorna silenciosamente,
+     * pois pode ser o período inicial imediatamente após a subscrição.
+     * Quando o silêncio exceder {@link #TICK_TIMEOUT}, aciona o callback
+     * configurado em virtual thread para não bloquear o scheduler.
      */
     private void checkTickArrival() {
         Instant last = lastTickAt.get();
@@ -173,6 +182,7 @@ public class TickHeartbeat {
         log.warn("TICK HEARTBEAT | no ticks for {}min | possible connection issue",
                 silence.toMinutes());
 
+        // Executado em virtual thread para não bloquear o scheduler durante a reconexão
         Runnable callback = onTickTimeout;
         if (callback != null) {
             Thread.startVirtualThread(callback);

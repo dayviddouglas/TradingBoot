@@ -27,34 +27,23 @@ import java.util.concurrent.CompletionException;
 /**
  * Orquestrador principal do ciclo de vida de um trade na plataforma Deriv.
  *
- * Responsabilidade única: coordenar os componentes especializados
- * para transformar um sinal do StrategyEngine em um contrato executado.
+ * Coordena os componentes especializados para transformar um sinal emitido pelo
+ * {@code StrategyEngine} em um contrato executado e monitorado até o fechamento.
  *
- * Fluxo orquestrado:
- * 1. TradeValidator      → valida se pode operar
- * 2. AtrRiskManager      → avalia risco e ajusta stake
- * 3. RegimeRegistry      → consulta regime confirmado do ativo (v5)
- * 4. TradeContextFactory → constrói o contexto da operação com regime
- * 5. TradeExecutor       → executa proposal → ROI check → buy
- * 6. TradeStateRegistry  → registra contrato aberto
- * 7. TradeMonitor        → monitora via stream + watchdog
- * 8. TradeErrorHandler   → classifica e trata erros
+ * Fluxo orquestrado em {@link #onFinalSignal}:
+ * <ol>
+ *   <li>{@link TradeValidator} — valida se o sinal pode prosseguir para execução</li>
+ *   <li>{@link AtrRiskManager} — avalia o risco pelo ATR e retorna o stake ajustado</li>
+ *   <li>{@link RegimeRegistry} — consulta o regime de mercado confirmado do ativo</li>
+ *   <li>{@link TradeContextFactory} — constrói o contexto imutável da operação</li>
+ *   <li>{@link TradeExecutor} — executa o ciclo proposal → ROI check → buy em virtual thread</li>
+ *   <li>{@link TradeStateRegistry} — registra o contrato aberto para monitoramento</li>
+ *   <li>{@link TradeMonitor} — monitora o contrato via stream WebSocket e watchdog</li>
+ *   <li>{@link TradeErrorHandler} — classifica e trata erros ocorridos na execução</li>
+ * </ol>
  *
- * Correção v5.3:
- * - Removidas todas as chamadas a ensureAuthorized() e AUTH_TIMEOUT.
- *   Com o novo modelo OTP da Deriv, a sessão WebSocket já está
- *   autenticada desde a conexão — não há estado de autorização
- *   para verificar ou renovar em nenhum ponto do fluxo de trade.
- * - checkTradeAvailability() não chama mais ensureAuthorized()
- *   antes do proposal.
- *
- * Correção v5.4.2 — bug de regime não registrado:
- * - O RegimeRegistry foi injetado e passou a ser consultado em
- *   onFinalSignal() antes da criação do TradeContext.
- * - O regime confirmado é passado explicitamente para
- *   contextFactory.create() via sobrecarga com confirmedRegime.
- * - Antes, a sobrecarga sem regime era chamada, resultando em
- *   regime vazio em todos os trades fora do modo CONFLUENCE.
+ * A autenticação ocorre na URL do WebSocket via OTP antes da conexão ser estabelecida.
+ * Não há verificação de estado de autorização neste serviço — o canal já está autenticado.
  */
 @Service
 public class DerivTradeService {
@@ -64,14 +53,30 @@ public class DerivTradeService {
 
     private final DerivMarketDataService marketDataService;
     private final AtrRiskManager         atrRiskManager;
-    private final TradeValidator validator;
-    private final TradeContextFactory contextFactory;
-    private final TradeExecutor executor;
-    private final TradeMonitor monitor;
-    private final TradeErrorHandler errorHandler;
-    private final TradeStateRegistry registry;
-    private final RegimeRegistry         regimeRegistry;  // ← v5.4.2
+    private final TradeValidator         validator;
+    private final TradeContextFactory    contextFactory;
+    private final TradeExecutor          executor;
+    private final TradeMonitor           monitor;
+    private final TradeErrorHandler      errorHandler;
+    private final TradeStateRegistry     registry;
 
+    /** Consultado em cada sinal para obter o regime confirmado pelo filtro de persistência. */
+    private final RegimeRegistry         regimeRegistry;
+
+    /**
+     * Inicializa o serviço e registra o {@link TradeMonitor} como handler de atualizações
+     * de contratos abertos no {@link DerivMarketDataService}.
+     *
+     * @param marketDataService abstração da API Deriv; fornece proposal, buy e stream de contratos
+     * @param atrRiskManager    avalia risco por ATR e decide se o trade pode ser executado
+     * @param validator         valida as pré-condições antes de cada operação
+     * @param contextFactory    constrói o {@link TradeContext} imutável da operação
+     * @param executor          executa o ciclo proposal → ROI check → buy
+     * @param monitor           monitora contratos abertos via stream e watchdog
+     * @param errorHandler      classifica e trata erros ocorridos durante a execução
+     * @param registry          gerencia os estados operacionais por ativo e por contrato
+     * @param regimeRegistry    fornece o regime de mercado confirmado por ativo
+     */
     public DerivTradeService(
             DerivMarketDataService marketDataService,
             AtrRiskManager atrRiskManager,
@@ -81,7 +86,7 @@ public class DerivTradeService {
             TradeMonitor monitor,
             TradeErrorHandler errorHandler,
             TradeStateRegistry registry,
-            RegimeRegistry regimeRegistry            // ← v5.4.2
+            RegimeRegistry regimeRegistry
     ) {
         this.marketDataService = marketDataService;
         this.atrRiskManager    = atrRiskManager;
@@ -91,8 +96,9 @@ public class DerivTradeService {
         this.monitor           = monitor;
         this.errorHandler      = errorHandler;
         this.registry          = registry;
-        this.regimeRegistry    = regimeRegistry;     // ← v5.4.2
+        this.regimeRegistry    = regimeRegistry;
 
+        // Registra o TradeMonitor para receber todas as atualizações de contratos abertos
         this.marketDataService.onOpenContract(monitor::handleStreamUpdate);
     }
 
@@ -101,22 +107,20 @@ public class DerivTradeService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Processa um sinal final emitido pelo StrategyEngine.
+     * Processa um sinal final emitido pelo {@code StrategyEngine}.
      *
-     * Executa as validações iniciais na thread do WebSocket (rápido)
-     * e despacha a execução para uma virtual thread (I/O bound).
+     * As validações iniciais e a avaliação de risco são executadas na thread do chamador.
+     * A execução do contrato (I/O bound) é despachada para uma virtual thread separada,
+     * liberando a thread do WebSocket imediatamente após o despacho.
      *
-     * Correção v5.4.2:
-     * O regime confirmado é agora consultado diretamente do RegimeRegistry
-     * antes da criação do TradeContext, garantindo que o campo regime seja
-     * preenchido corretamente em qualquer DecisionMode (VOTING, CONFLUENCE
-     * ou SINGLE_STRATEGY). Antes dessa correção, o regime era extraído do
-     * Signal.metadata, que só continha o campo "regime" no modo CONFLUENCE,
-     * resultando em regime vazio nos demais modos.
+     * O regime confirmado é consultado do {@link RegimeRegistry} antes da criação do
+     * {@link TradeContext}, garantindo que o campo {@code regime} seja preenchido
+     * corretamente em qualquer {@code DecisionMode}. O fallback é {@code CHOPPY},
+     * retornado pelo registry quando ainda não há regime confirmado para o ativo.
      *
-     * @param profile    configuração do ativo
-     * @param signal     sinal final (BUY/SELL)
-     * @param recentBars barras recentes para avaliação de risco ATR
+     * @param profile    configuração do ativo lida do strategies.json
+     * @param signal     sinal final com tipo BUY ou SELL
+     * @param recentBars barras recentes utilizadas pelo {@link AtrRiskManager} para cálculo de ATR
      */
     public void onFinalSignal(
             StrategiesProfile profile,
@@ -144,8 +148,7 @@ public class DerivTradeService {
 
         logRiskResult(profile.getSymbol(), riskDecision);
 
-        // Consulta o regime confirmado do RegimeRegistry (v5.4.2)
-        // Retorna CHOPPY como padrão conservador se ainda não confirmado
+        // Consulta o regime confirmado; retorna CHOPPY como padrão conservador se não confirmado
         String confirmedRegime = regimeRegistry
                 .getRegime(profile.getSymbol())
                 .name();
@@ -153,8 +156,9 @@ public class DerivTradeService {
         TradeContext context = contextFactory.create(
                 profile, signal,
                 riskDecision.adjustedAmount(),
-                confirmedRegime);                    // ← v5.4.2
+                confirmedRegime);
 
+        // Stake inválido após normalização indica problema na configuração do ativo
         if (context.amount() <= 0.0) {
             log.warn("TRADE SKIP | symbol={} | reason=stake invalid "
                             + "after normalization",
@@ -167,6 +171,7 @@ public class DerivTradeService {
 
         logTradeStart(context);
 
+        // Execução em virtual thread para não bloquear a thread do WebSocket
         Thread.startVirtualThread(() -> executeAsync(state, context));
     }
 
@@ -174,6 +179,15 @@ public class DerivTradeService {
     // Execução assíncrona
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Executa o ciclo completo de abertura do contrato em virtual thread.
+     * Delega ao {@link TradeExecutor} e, em caso de sucesso, registra o contrato
+     * no {@link TradeStateRegistry} e inicia o monitoramento pelo {@link TradeMonitor}.
+     * Erros são classificados e tratados pelo {@link TradeErrorHandler}.
+     *
+     * @param state   estado do ativo com contexto da operação já aplicado
+     * @param context contexto imutável da operação construído pelo {@link TradeContextFactory}
+     */
     private void executeAsync(TradeState state, TradeContext context) {
         try {
             TradeExecutionResult result = executor.execute(context);
@@ -190,6 +204,8 @@ public class DerivTradeService {
 
             long contractId = result.contractId();
             state.markOpen(contractId);
+
+            // Registra o contrato para que stream e watchdog possam localizar o estado pelo contractId
             registry.registerContract(contractId, state);
 
             monitor.startMonitoring(state, context);
@@ -204,6 +220,15 @@ public class DerivTradeService {
     // Avaliação de risco
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Extrai as estratégias decisoras do metadata do sinal e delega a avaliação de risco
+     * ao {@link AtrRiskManager}, que retorna uma decisão binária: executa ou bloqueia.
+     *
+     * @param profile    configuração do ativo com o stake configurado
+     * @param signal     sinal com metadata contendo as estratégias decisoras
+     * @param recentBars barras recentes para cálculo do ATR
+     * @return decisão de risco com stake ajustado e indicador de bloqueio
+     */
     private AtrRiskDecision evaluateRisk(
             StrategiesProfile profile,
             Signal signal,
@@ -220,6 +245,13 @@ public class DerivTradeService {
         );
     }
 
+    /**
+     * Extrai a lista de estratégias que participaram da decisão do metadata do sinal.
+     * Retorna lista vazia quando o metadata for nulo ou o campo estiver ausente.
+     *
+     * @param signal sinal com metadata populado pelo {@code SignalEmitter}
+     * @return lista de nomes das estratégias decisoras ou lista vazia
+     */
     @SuppressWarnings("unchecked")
     private List<String> extractDecisionStrategies(Signal signal) {
         if (signal.getMetadata() == null) return List.of();
@@ -240,21 +272,18 @@ public class DerivTradeService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Verifica se um ativo suporta o tipo de contrato e parâmetros
-     * configurados. Usado pelo BotInitializer durante o bootstrap.
+     * Verifica se um ativo suporta o tipo de contrato e os parâmetros configurados,
+     * enviando um proposal de teste à API Deriv.
+     * Utilizado pelo {@code BotInitializer} durante o bootstrap para filtrar ativos
+     * com configurações incompatíveis antes de iniciar a operação.
      *
-     * Correção v5.3:
-     * Removida a chamada a ensureAuthorized() que existia antes do
-     * proposal. Com o modelo OTP, a sessão já está autenticada desde
-     * a conexão WebSocket.
-     *
-     * @param symbol       símbolo do ativo
-     * @param contractType tipo de contrato (CALL ou PUT)
-     * @param amount       valor do stake
-     * @param currency     moeda
-     * @param duration     duração do contrato
-     * @param durationUnit unidade de duração
-     * @return true se o ativo suporta os parâmetros
+     * @param symbol       símbolo do ativo a ser verificado
+     * @param contractType tipo de contrato: {@code CALL} ou {@code PUT}
+     * @param amount       valor do stake do proposal de teste
+     * @param currency     moeda do stake
+     * @param duration     duração numérica do contrato
+     * @param durationUnit unidade de duração do contrato
+     * @return {@code true} se a API retornar um proposal válido com {@code id} preenchido
      */
     public boolean checkTradeAvailability(
             String symbol,
@@ -292,6 +321,10 @@ public class DerivTradeService {
     // Logs
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Registra em log o bloqueio da operação pelo {@link AtrRiskManager},
+     * incluindo os valores de ATR e o motivo do bloqueio.
+     */
     private void logRiskBlock(String symbol, AtrRiskDecision risk) {
         log.info("ATR RISK BLOCK | symbol={} | type={} | atrFast={} "
                         + "| atrBaseline={} | atrRatio={} | reason={}",
@@ -303,6 +336,9 @@ public class DerivTradeService {
                 risk.reason());
     }
 
+    /**
+     * Registra em log o resultado da avaliação de risco quando a operação é liberada.
+     */
     private void logRiskResult(String symbol, AtrRiskDecision risk) {
         if (risk.isStakeReduced()) {
             log.info("ATR RISK REDUCE | symbol={} | type={} | atrRatio={} "
@@ -324,10 +360,9 @@ public class DerivTradeService {
     }
 
     /**
-     * Registra o início de uma operação nos logs operacionais.
-     *
-     * Inclui o regime confirmado para rastreabilidade completa
-     * da decisão de entrada. (v5.4.2)
+     * Registra em log o início de uma operação com todos os parâmetros relevantes,
+     * incluindo o regime confirmado para rastreabilidade da decisão de entrada.
+     * Exibe {@code "UNKNOWN"} quando o regime não estiver disponível no contexto.
      */
     private void logTradeStart(TradeContext context) {
         log.info("TRADE START | symbol={} | signal={} | contractType={} "
@@ -342,6 +377,11 @@ public class DerivTradeService {
                 context.regime().isBlank() ? "UNKNOWN" : context.regime());
     }
 
+    /**
+     * Registra em log a falha na verificação de disponibilidade de um ativo.
+     * Diferencia erros da API Deriv ({@link DerivErrorException}) de erros genéricos
+     * para facilitar o diagnóstico durante o bootstrap.
+     */
     private void logAvailabilityCheckFailure(
             String symbol,
             String contractType,
@@ -372,6 +412,14 @@ public class DerivTradeService {
     // Utilitários
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Extrai a mensagem de erro normalizada em lowercase da exceção capturada.
+     * Quando a exceção for {@link CompletionException}, extrai a causa raiz.
+     * Quando a causa for {@link DerivErrorException}, usa sua mensagem diretamente.
+     *
+     * @param e exceção capturada no fluxo de execução assíncrona
+     * @return mensagem de erro em lowercase, ou {@code "unknown error"} se ausente
+     */
     private String extractErrorMessage(Exception e) {
         Throwable cause =
                 (e instanceof CompletionException && e.getCause() != null)

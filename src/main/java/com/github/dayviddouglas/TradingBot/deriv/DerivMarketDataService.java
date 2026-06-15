@@ -24,24 +24,23 @@ import java.util.function.Consumer;
 /**
  * Camada de abstração da API Deriv sobre WebSocket.
  *
- * Correção v5.3:
- * O fluxo de autorização foi removido desta classe. Com o novo modelo
- * OTP da Deriv, a autenticação acontece na URL do WebSocket antes da
- * conexão ser estabelecida. Não é mais necessário enviar mensagem
- * de authorize após conectar.
+ * Concentra as seguintes responsabilidades:
+ * <ul>
+ *   <li>Registrar o handler de mensagens no {@link DerivWsClient} e rotear cada mensagem
+ *       pelo campo {@code msg_type}</li>
+ *   <li>Registrar e invocar callbacks externos de ticks, histórico de candles
+ *       e atualizações de contratos abertos</li>
+ *   <li>Notificar o {@link TickHeartbeat} a cada tick recebido, mantendo o monitor
+ *       de saúde da conexão atualizado</li>
+ *   <li>Parsear candles recebidos em objetos {@link Bar} ordenados cronologicamente</li>
+ *   <li>Delegar paginação de histórico ao {@link DerivHistoryPaginator}</li>
+ *   <li>Encaminhar erros da API ao {@link DerivRequestSender} ou ao {@link DerivHistoryPaginator}
+ *       conforme o {@code req_id} da mensagem</li>
+ * </ul>
  *
- * Responsabilidades mantidas:
- * - Registrar handler de mensagens no DerivWsClient
- * - Rotear mensagens por msg_type
- * - Despachar callbacks de ticks e contratos abertos
- * - Notificar TickHeartbeat a cada tick recebido
- * - Parsear candles recebidos em objetos Bar
- *
- * Responsabilidades removidas:
- * - authorize() — autenticação agora é via OTP na URL
- * - authorizeAndWaitFailFast() — não mais necessário
- * - ensureAuthorized() — não mais necessário
- * - Estado de autorização (authorized, lastAuthorizedToken) — removidos
+ * A autenticação ocorre na URL do WebSocket via OTP antes da conexão ser estabelecida.
+ * Não há envio de mensagem de autorização após a conexão — o canal já está autenticado
+ * ao ser aberto pelo {@link DerivWsClient}.
  */
 public class DerivMarketDataService {
 
@@ -54,10 +53,25 @@ public class DerivMarketDataService {
     private final TickHeartbeat tickHeartbeat;
     private final ObjectMapper mapper;
 
+    /** Callback invocado pelo roteador a cada tick recebido da API. */
     private volatile TickHandler onTick;
+
+    /** Callback invocado pelo {@link DerivHistoryPaginator} ao concluir o download de histórico. */
     private volatile BiConsumer<Long, List<Bar>> onCandleHistory;
+
+    /** Callback invocado a cada atualização de contrato aberto recebida via stream. */
     private volatile Consumer<JsonNode> onOpenContract;
 
+    /**
+     * Inicializa o serviço registrando o roteador de mensagens e o handler de desconexão
+     * no {@link DerivWsClient}.
+     *
+     * @param wsClient           cliente WebSocket utilizado para envio e recebimento de mensagens
+     * @param requestSender      gerencia o envio de requisições e a correlação com Futures pendentes
+     * @param historyPaginator   gerencia o ciclo de paginação para downloads de histórico extensos
+     * @param tickHeartbeat      monitor de saúde da conexão, notificado a cada tick recebido
+     * @param mapper             utilizado para deserializar as mensagens JSON recebidas
+     */
     public DerivMarketDataService(
             DerivWsClient wsClient,
             DerivRequestSender requestSender,
@@ -81,14 +95,33 @@ public class DerivMarketDataService {
     // Registro de callbacks
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Registra o handler invocado a cada tick recebido da API.
+     * Implementado pelo {@code MultiSymbolDerivBotRunner} para rotear ticks
+     * aos {@code TickCandleAggregator} correspondentes.
+     *
+     * @param handler implementação de {@link TickHandler} ou lambda equivalente
+     */
     public void onTick(TickHandler handler) {
         this.onTick = handler;
     }
 
+    /**
+     * Registra o handler invocado ao concluir o download de um histórico de candles.
+     * Recebe o ID pai da requisição e a lista completa de {@link Bar} acumulados.
+     *
+     * @param handler consumer com o ID pai e a lista de candles
+     */
     public void onCandleHistory(BiConsumer<Long, List<Bar>> handler) {
         this.onCandleHistory = handler;
     }
 
+    /**
+     * Registra o handler invocado a cada atualização de contrato aberto
+     * recebida via stream {@code proposal_open_contract}.
+     *
+     * @param handler consumer com a mensagem JSON completa da atualização
+     */
     public void onOpenContract(Consumer<JsonNode> handler) {
         this.onOpenContract = handler;
     }
@@ -97,6 +130,13 @@ public class DerivMarketDataService {
     // Mercado
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Envia o request de subscrição de ticks em tempo real para o símbolo informado.
+     * As atualizações chegam via handler registrado em {@link #onTick}.
+     *
+     * @param symbol símbolo do ativo a ser subscrito
+     * @return {@code req_id} da requisição de subscrição
+     */
     public long subscribeTicks(String symbol) {
         ObjectNode payload = requestSender.newPayload();
         payload.put("ticks", symbol);
@@ -108,6 +148,18 @@ public class DerivMarketDataService {
         return reqId;
     }
 
+    /**
+     * Inicia o download de histórico de candles com paginação automática.
+     * Quando {@code count} exceder o limite de 1000 candles por requisição,
+     * o {@link DerivHistoryPaginator} divide em páginas e acumula os resultados.
+     * O histórico completo é entregue ao handler registrado em {@link #onCandleHistory}.
+     *
+     * @param symbol             símbolo do ativo
+     * @param granularitySeconds granularidade dos candles em segundos
+     * @param count              quantidade total de candles desejada; deve ser maior que zero
+     * @return ID pai da requisição de paginação
+     * @throws IllegalArgumentException se {@code count} for menor ou igual a zero
+     */
     public long fetchCandleHistory(
             String symbol,
             int granularitySeconds,
@@ -129,6 +181,18 @@ public class DerivMarketDataService {
     // Trade
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Envia o request de proposal para obter o preço e o payout estimado de um contrato.
+     * O Future é completado quando a API retornar a resposta do proposal.
+     *
+     * @param symbol       símbolo do ativo subjacente
+     * @param contractType tipo de contrato: {@code CALL} ou {@code PUT}
+     * @param amount       valor do stake
+     * @param currency     moeda do stake
+     * @param duration     duração numérica do contrato
+     * @param durationUnit unidade de duração: {@code s}, {@code m}, {@code h} ou {@code d}
+     * @return Future completado com a resposta JSON do proposal
+     */
     public CompletableFuture<JsonNode> requestProposal(
             String symbol,
             String contractType,
@@ -138,17 +202,24 @@ public class DerivMarketDataService {
             String durationUnit
     ) {
         ObjectNode payload = requestSender.newPayload();
-        payload.put("proposal",         1);
+        payload.put("proposal",          1);
         payload.put("underlying_symbol", symbol);
-        payload.put("contract_type",    contractType);
-        payload.put("amount",           amount);
-        payload.put("basis",            "stake");
-        payload.put("currency",         currency);
-        payload.put("duration",         duration);
-        payload.put("duration_unit",    durationUnit);
+        payload.put("contract_type",     contractType);
+        payload.put("amount",            amount);
+        payload.put("basis",             "stake");
+        payload.put("currency",          currency);
+        payload.put("duration",          duration);
+        payload.put("duration_unit",     durationUnit);
         return requestSender.send(payload);
     }
 
+    /**
+     * Envia o request de compra do contrato usando o ID do proposal aprovado.
+     *
+     * @param proposalId ID do proposal retornado pela API na etapa anterior
+     * @param price      preço máximo aceito para a compra, equivalente ao stake
+     * @return Future completado com a resposta JSON do buy, contendo {@code contract_id}
+     */
     public CompletableFuture<JsonNode> buy(
             String proposalId,
             double price
@@ -159,6 +230,13 @@ public class DerivMarketDataService {
         return requestSender.send(payload);
     }
 
+    /**
+     * Subscreve o stream de atualizações de um contrato aberto.
+     * As atualizações chegam via handler registrado em {@link #onOpenContract}.
+     *
+     * @param contractId ID do contrato a ser monitorado
+     * @return Future completado com o acknowledge da subscrição
+     */
     public CompletableFuture<JsonNode> subscribeOpenContract(
             long contractId
     ) {
@@ -169,6 +247,14 @@ public class DerivMarketDataService {
         return requestSender.send(payload);
     }
 
+    /**
+     * Consulta o estado atual de um contrato aberto sem subscrever o stream.
+     * Utilizado pelo watchdog do {@link com.github.dayviddouglas.TradingBot.deriv.trade.monitor.TradeMonitor}
+     * para polls periódicos quando o stream não entrega o fechamento.
+     *
+     * @param contractId ID do contrato a ser consultado
+     * @return Future completado com a resposta JSON do estado atual do contrato
+     */
     public CompletableFuture<JsonNode> getOpenContractOnce(
             long contractId
     ) {
@@ -178,6 +264,12 @@ public class DerivMarketDataService {
         return requestSender.send(payload);
     }
 
+    /**
+     * Cancela uma subscrição ativa pelo ID retornado pela API no campo {@code subscription.id}.
+     *
+     * @param subscriptionId ID da subscrição a ser cancelada
+     * @return Future completado com a confirmação do cancelamento
+     */
     public CompletableFuture<JsonNode> forget(String subscriptionId) {
         ObjectNode payload = requestSender.newPayload();
         payload.put("forget", subscriptionId);
@@ -188,6 +280,13 @@ public class DerivMarketDataService {
     // Roteamento de mensagens
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Ponto de entrada de todas as mensagens recebidas via WebSocket.
+     * Deserializa o JSON, trata erros da API e roteia pelo campo {@code msg_type}.
+     * Mensagens com {@code msg_type} não mapeado são ignoradas silenciosamente.
+     *
+     * @param raw mensagem JSON bruta recebida do WebSocket
+     */
     private void routeMessage(String raw) {
         try {
             JsonNode msg = mapper.readTree(raw);
@@ -205,7 +304,7 @@ public class DerivMarketDataService {
                 case "proposal_open_contract" -> handleOpenContract(msg);
                 case "proposal", "buy",
                      "forget"                 -> requestSender.complete(msg);
-                default -> { /* ignorado silenciosamente */ }
+                default -> { /* msg_type não mapeado — ignorado silenciosamente */ }
             }
 
         } catch (Exception e) {
@@ -217,6 +316,15 @@ public class DerivMarketDataService {
     // Handlers por tipo de mensagem
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Trata mensagens de erro retornadas pela API Deriv.
+     * Quando o {@code req_id} pertencer a uma página de paginação em andamento,
+     * delega ao {@link DerivHistoryPaginator} para entrega parcial do histórico.
+     * Para demais requisições com {@code req_id} válido, completa o Future
+     * correspondente com {@link DerivErrorException}.
+     *
+     * @param msg mensagem de erro JSON recebida da API
+     */
     private void handleError(JsonNode msg) {
         String errMessage = msg.path("error").path("message")
                 .asText("Deriv error");
@@ -238,10 +346,11 @@ public class DerivMarketDataService {
     }
 
     /**
-     * Processa tick recebido e notifica o TickHeartbeat.
+     * Processa tick recebido, valida os campos obrigatórios e notifica o {@link TickHeartbeat}.
+     * A notificação ao {@link TickHeartbeat} é obrigatória para que o monitor de saúde
+     * da conexão funcione corretamente. Ticks com campos inválidos são silenciosamente descartados.
      *
-     * tickHeartbeat.recordTick() é obrigatório para que o monitor
-     * de saúde da conexão funcione corretamente.
+     * @param msg mensagem JSON do tipo {@code tick}
      */
     private void handleTick(JsonNode msg) {
         JsonNode tick = msg.get("tick");
@@ -254,6 +363,7 @@ public class DerivMarketDataService {
         if (symbol.isBlank() || epoch <= 0
                 || !Double.isFinite(quote)) return;
 
+        // Obrigatório para que o TickHeartbeat detecte conexões ativas
         tickHeartbeat.recordTick();
 
         TickHandler handler = onTick;
@@ -262,6 +372,12 @@ public class DerivMarketDataService {
         handler.onTick(symbol, epoch, quote);
     }
 
+    /**
+     * Processa página de histórico recebida e delega ao {@link DerivHistoryPaginator},
+     * que decide se deve solicitar mais páginas ou entregar o resultado ao callback.
+     *
+     * @param msg mensagem JSON do tipo {@code history} ou {@code candles}
+     */
     private void handleHistory(JsonNode msg) {
         JsonNode candles = msg.get("candles");
         if (candles == null || !candles.isArray()) return;
@@ -272,6 +388,14 @@ public class DerivMarketDataService {
         historyPaginator.handlePage(reqId, bars);
     }
 
+    /**
+     * Processa atualização de contrato aberto recebida via stream.
+     * Completa o Future pendente do {@link DerivRequestSender} para o acknowledge
+     * da subscrição e invoca o callback externo registrado em {@link #onOpenContract}
+     * para todas as atualizações subsequentes.
+     *
+     * @param msg mensagem JSON do tipo {@code proposal_open_contract}
+     */
     private void handleOpenContract(JsonNode msg) {
         requestSender.complete(msg);
 
@@ -285,6 +409,13 @@ public class DerivMarketDataService {
     // Parsing de candles
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Converte o array JSON de candles em lista de {@link Bar} ordenada cronologicamente.
+     * Candles com campos inválidos ou ausentes são silenciosamente descartados.
+     *
+     * @param candles nó JSON do tipo array com os candles recebidos
+     * @return lista de {@link Bar} válidos ordenados por timestamp
+     */
     private List<Bar> parseBars(JsonNode candles) {
         List<Bar> bars = new ArrayList<>(candles.size());
 
@@ -297,6 +428,16 @@ public class DerivMarketDataService {
         return bars;
     }
 
+    /**
+     * Converte um nó JSON individual em um {@link Bar}.
+     * Retorna {@code null} quando o epoch for inválido ou qualquer campo OHLC
+     * não for um número finito, descartando silenciosamente o candle corrompido.
+     * O campo {@code volume} aceita o valor padrão {@code 0.0} pois a API
+     * Deriv não fornece volume real para forex e metais.
+     *
+     * @param node nó JSON representando um único candle
+     * @return {@link Bar} construído ou {@code null} se os dados forem inválidos
+     */
     private Bar parseBar(JsonNode node) {
         long   epoch  = node.path("epoch").asLong(-1);
         if (epoch <= 0) return null;
@@ -322,6 +463,13 @@ public class DerivMarketDataService {
     // Utilitários
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Encaminha o histórico completo ao callback externo registrado em {@link #onCandleHistory}.
+     * Invocado pelo {@link DerivHistoryPaginator} ao concluir todas as páginas de uma requisição.
+     *
+     * @param reqId ID pai da requisição de paginação
+     * @param bars  lista completa de candles acumulados
+     */
     private void dispatchCandleHistory(long reqId, List<Bar> bars) {
         BiConsumer<Long, List<Bar>> handler = onCandleHistory;
         if (handler != null) {
