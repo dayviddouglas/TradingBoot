@@ -14,10 +14,9 @@ import java.util.Map;
  * - configurações de trade (stake, duração, etc.)
  * - quais estratégias estão habilitadas e seus parâmetros
  *
- * Após refatoração, esta classe tem responsabilidade única:
- * ser um modelo de dados com helpers de leitura.
- * A validação foi delegada ao StrategiesProfileValidator.
- * O parsing foi delegado ao StrategiesProfileParser.
+ * Esta classe tem responsabilidade única: ser um modelo de dados com helpers de leitura.
+ * A validação foi delegada ao {@link StrategiesProfileValidator}.
+ * O parsing foi delegado ao {@link StrategiesProfileParser}.
  */
 public class StrategiesProfile {
 
@@ -25,6 +24,8 @@ public class StrategiesProfile {
     private int granularitySeconds;
     private Map<String, Object> engine;
     private TradeConfig trade;
+
+    /** Mapa de nome da estratégia para seus parâmetros de configuração. */
     private Map<String, Map<String, Object>> strategies;
 
     // ═══════════════════════════════════════════════════════════════
@@ -56,7 +57,10 @@ public class StrategiesProfile {
 
     /**
      * Retorna o decisionMode como String normalizada.
-     * Padrão: "CONFLUENCE" para compatibilidade retroativa.
+     * Quando o bloco {@code engine} está ausente ou o campo {@code decisionMode}
+     * não está definido, retorna {@code "CONFLUENCE"} como padrão.
+     *
+     * @return nome do modo de decisão em maiúsculas
      */
     public String getDecisionModeString() {
         if (engine == null) return DecisionMode.CONFLUENCE.name();
@@ -67,7 +71,10 @@ public class StrategiesProfile {
 
     /**
      * Retorna o decisionMode como enum tipado.
-     * Fallback para CONFLUENCE se o valor for inválido.
+     * Caso o valor configurado não corresponda a nenhum valor do enum,
+     * retorna {@link DecisionMode#CONFLUENCE} como fallback.
+     *
+     * @return modo de decisão ativo para este profile
      */
     public DecisionMode getDecisionMode() {
         try {
@@ -78,24 +85,32 @@ public class StrategiesProfile {
     }
 
     /**
-     * Retorna o número máximo de barras do histórico local.
+     * Retorna o número máximo de barras mantidas no histórico local do engine.
      * Padrão: 1500.
+     *
+     * @return limite de barras do histórico
      */
     public int getMaxBars() {
         return getIntFromEngine("maxBars", 1500);
     }
 
     /**
-     * Retorna o rangeLookback para o VolatilityFilter.
+     * Retorna o período de lookback utilizado pelo {@code VolatilityFilter}
+     * para calcular o range médio dos candles.
      * Padrão: 14.
+     *
+     * @return número de candles do lookback
      */
     public int getRangeLookback() {
         return getIntFromEngine("rangeLookback", 14);
     }
 
     /**
-     * Retorna o rangeMultiplier para o VolatilityFilter.
+     * Retorna o multiplicador aplicado sobre o range médio no {@code VolatilityFilter}
+     * para definir o limiar mínimo de volatilidade aceito.
      * Padrão: 1.10.
+     *
+     * @return multiplicador de range
      */
     public double getRangeMultiplier() {
         return getDoubleFromEngine("rangeMultiplier", 1.10);
@@ -103,6 +118,10 @@ public class StrategiesProfile {
 
     /**
      * Conta quantas estratégias estão habilitadas neste profile.
+     * Uma estratégia é considerada habilitada quando seu campo {@code enabled}
+     * está presente e avaliado como {@code true}.
+     *
+     * @return total de estratégias habilitadas
      */
     public int countEnabledStrategies() {
         if (strategies == null) return 0;
@@ -116,12 +135,28 @@ public class StrategiesProfile {
     // Helpers privados
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Verifica se uma estratégia está habilitada a partir de seu mapa de configuração.
+     * Aceita tanto {@code Boolean} direto quanto a representação textual {@code "true"}.
+     *
+     * @param cfg mapa de parâmetros da estratégia
+     * @return {@code true} se o campo {@code enabled} indicar ativação
+     */
     private boolean isStrategyEnabled(Map<String, Object> cfg) {
         Object enabled = cfg.get("enabled");
         if (enabled instanceof Boolean bool) return bool;
         return enabled != null && "true".equalsIgnoreCase(enabled.toString());
     }
 
+    /**
+     * Lê um valor inteiro do bloco {@code engine} pelo nome da chave.
+     * Suporta valores do tipo {@link Number} e representação textual numérica.
+     * Retorna o valor padrão quando a chave está ausente, nula ou não conversível.
+     *
+     * @param key          nome da chave no bloco engine
+     * @param defaultValue valor retornado em caso de ausência ou falha de conversão
+     * @return valor inteiro lido ou o padrão informado
+     */
     private int getIntFromEngine(String key, int defaultValue) {
         if (engine == null) return defaultValue;
         Object raw = engine.get(key);
@@ -134,6 +169,15 @@ public class StrategiesProfile {
         }
     }
 
+    /**
+     * Lê um valor decimal do bloco {@code engine} pelo nome da chave.
+     * Suporta valores do tipo {@link Number} e representação textual numérica.
+     * Retorna o valor padrão quando a chave está ausente, nula ou não conversível.
+     *
+     * @param key          nome da chave no bloco engine
+     * @param defaultValue valor retornado em caso de ausência ou falha de conversão
+     * @return valor decimal lido ou o padrão informado
+     */
     private double getDoubleFromEngine(String key, double defaultValue) {
         if (engine == null) return defaultValue;
         Object raw = engine.get(key);

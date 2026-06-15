@@ -15,18 +15,23 @@ import java.util.*;
  * Fonte única de verdade para carregamento de profiles de estratégias.
  *
  * Responsabilidades:
- * - Carregar strategies.json do classpath (startup) ou filesystem (backtest)
- * - Parsear e validar StrategiesProfile
- * - Delegar construção de estratégias ao StrategyBuilder
+ * <ul>
+ *   <li>Carregar o {@code strategies.json} do classpath no startup ou
+ *       do filesystem em execuções de backtest.</li>
+ *   <li>Parsear e validar os {@link StrategiesProfile} via {@link StrategiesProfileParser}.</li>
+ *   <li>Delegar a construção de instâncias de estratégias ao {@link StrategyBuilder}.</li>
+ * </ul>
  *
- * Após refatoração, esta classe tem responsabilidade única:
- * carregar e fornecer profiles validados.
- * A construção de estratégias foi delegada ao StrategyBuilder.
+ * O arquivo do classpath é carregado de forma antecipada no construtor (fail-fast),
+ * garantindo que configurações inválidas ou ausentes sejam detectadas antes
+ * do início da operação do bot.
  *
  * Fluxo de carregamento:
- * 1. Construtor carrega automaticamente do classpath (fail-fast)
- * 2. loadProfiles() permite carregar de path externo (backtest)
- * 3. buildStrategies() delega para StrategyBuilder
+ * <ol>
+ *   <li>Construtor carrega automaticamente do classpath.</li>
+ *   <li>{@link #loadProfiles(String)} permite carregar de path externo para backtest.</li>
+ *   <li>{@link #buildStrategies(StrategiesProfile)} delega a construção ao {@link StrategyBuilder}.</li>
+ * </ol>
  */
 @Component
 public class StrategiesConfigLoader {
@@ -36,14 +41,22 @@ public class StrategiesConfigLoader {
     private final ObjectMapper mapper = new ObjectMapper();
     private final StrategyBuilder strategyBuilder;
     private final StrategiesProfileParser profileParser;
+
+    /**
+     * Profiles carregados e validados no startup a partir do classpath.
+     * Fornecidos ao runtime via {@link #getProfiles()}.
+     */
     private final List<StrategiesProfile> profiles;
 
     /**
-     * Construtor invocado pelo Spring.
-     * Carrega o strategies.json do classpath no startup (fail-fast).
+     * Carrega e valida os profiles do {@code strategies.json} no classpath
+     * durante a inicialização do contexto Spring.
      *
-     * @param strategyBuilder builder de estratégias
-     * @param profileParser   parser e validador de profiles
+     * Falha imediatamente caso o arquivo não seja encontrado ou contenha
+     * configurações inválidas.
+     *
+     * @param strategyBuilder builder responsável por instanciar as estratégias
+     * @param profileParser   parser e validador de profiles do JSON
      */
     public StrategiesConfigLoader(
             StrategyBuilder strategyBuilder,
@@ -55,21 +68,25 @@ public class StrategiesConfigLoader {
     }
 
     /**
-     * Retorna os profiles carregados no startup.
-     * Utilizado pelo MultiSymbolDerivBotRunner.
+     * Retorna os profiles carregados no startup a partir do classpath.
+     * Utilizado pelo {@code MultiSymbolDerivBotRunner} para configurar
+     * os pipelines de cada ativo.
      *
-     * @return lista imutável de profiles
+     * @return lista imutável de profiles carregados
      */
     public List<StrategiesProfile> getProfiles() {
         return profiles;
     }
 
     /**
-     * Carrega profiles de um path externo com fallback para classpath.
-     * Utilizado pelo BacktestRunner.
+     * Carrega profiles de um caminho externo, com fallback para o classpath
+     * caso o arquivo não exista no filesystem.
      *
-     * @param path caminho do arquivo (filesystem ou classpath)
-     * @return lista de profiles carregados
+     * Utilizado pelo {@code BacktestRunner} para execuções com arquivos
+     * de configuração externos ao classpath padrão.
+     *
+     * @param path caminho do arquivo no filesystem ou no classpath
+     * @return lista de profiles carregados e validados
      */
     public List<StrategiesProfile> loadProfiles(String path) {
         if (isValidFilesystemPath(path)) {
@@ -79,12 +96,13 @@ public class StrategiesConfigLoader {
     }
 
     /**
-     * Busca um profile pelo símbolo e granularidade.
+     * Localiza um profile pelo símbolo e granularidade, lançando exceção
+     * caso não exista nos profiles carregados no startup.
      *
      * @param symbol             símbolo do ativo
-     * @param granularitySeconds granularidade em segundos
-     * @return profile correspondente
-     * @throws IllegalStateException se o profile não existir
+     * @param granularitySeconds granularidade do candle em segundos
+     * @return profile correspondente ao símbolo e granularidade informados
+     * @throws IllegalStateException se o profile não for encontrado
      */
     public StrategiesProfile requireProfile(String symbol, int granularitySeconds) {
         return profiles.stream()
@@ -97,10 +115,11 @@ public class StrategiesConfigLoader {
     }
 
     /**
-     * Constrói estratégias para o profile delegando ao StrategyBuilder.
+     * Constrói as instâncias de estratégias habilitadas para o profile informado,
+     * delegando a criação ao {@link StrategyBuilder}.
      *
-     * @param profile profile do ativo
-     * @return lista de estratégias habilitadas
+     * @param profile profile do ativo cujas estratégias serão construídas
+     * @return lista de estratégias habilitadas e instanciadas
      */
     public List<TradingStrategy> buildStrategies(StrategiesProfile profile) {
         return strategyBuilder.build(profile.getStrategies());
@@ -110,6 +129,13 @@ public class StrategiesConfigLoader {
     // Carregamento
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Carrega e parseia o arquivo de configuração a partir do classpath.
+     *
+     * @param classpathLocation caminho relativo ao classpath
+     * @return lista de profiles parseados e validados
+     * @throws IllegalStateException se o arquivo não for encontrado ou falhar no parse
+     */
     private List<StrategiesProfile> loadFromClasspath(String classpathLocation) {
         try {
             ClassPathResource resource = new ClassPathResource(classpathLocation);
@@ -130,6 +156,13 @@ public class StrategiesConfigLoader {
         }
     }
 
+    /**
+     * Carrega e parseia o arquivo de configuração a partir do filesystem.
+     *
+     * @param path caminho absoluto ou relativo ao arquivo no filesystem
+     * @return lista de profiles parseados e validados
+     * @throws IllegalStateException se a leitura ou o parse falharem
+     */
     private List<StrategiesProfile> loadFromFilesystem(Path path) {
         try {
             String json = Files.readString(path);
@@ -141,6 +174,15 @@ public class StrategiesConfigLoader {
         }
     }
 
+    /**
+     * Verifica se o caminho informado corresponde a um arquivo existente no filesystem.
+     *
+     * Retorna {@code false} para caminhos nulos, em branco ou que lancem
+     * exceção durante a verificação de existência.
+     *
+     * @param path caminho a ser verificado
+     * @return {@code true} se o arquivo existir no filesystem, {@code false} caso contrário
+     */
     private boolean isValidFilesystemPath(String path) {
         if (path == null || path.isBlank()) return false;
         try {

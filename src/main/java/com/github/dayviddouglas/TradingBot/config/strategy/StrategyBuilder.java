@@ -8,30 +8,30 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Responsável por construir instâncias de TradingStrategy
- * a partir da configuração do strategies.json.
+ * Responsável por construir instâncias de {@link TradingStrategy}
+ * a partir da configuração lida do strategies.json.
  *
- * Extraído do StrategiesConfigLoader para respeitar SRP:
- * - StrategiesConfigLoader carrega e valida os profiles
- * - StrategyBuilder constrói as instâncias de estratégia
+ * Cada estratégia é construída somente se estiver habilitada no JSON
+ * ({@code enabled: true}). Os parâmetros de cada estratégia são lidos
+ * diretamente do mapa de configuração, com valores padrão aplicados quando
+ * a chave está ausente ou não conversível.
  *
  * Para adicionar nova estratégia:
- * 1. Criar classe que implementa TradingStrategy
- * 2. Adicionar método buildXxx() aqui
- * 3. Chamar esse método em build()
- * 4. Adicionar bloco no strategies.json
+ * 1. Criar classe que implementa {@link TradingStrategy}
+ * 2. Adicionar método {@code buildXxx()} aqui
+ * 3. Chamar esse método em {@link #build(Map)}
+ * 4. Adicionar bloco correspondente no strategies.json
  */
 @Component
 public class StrategyBuilder {
 
     /**
      * Constrói a lista de estratégias habilitadas para o profile.
+     * A ordem de chamada dos builders define a ordem de avaliação no engine.
+     * Estratégias com {@code enabled: false} ou ausentes do mapa são ignoradas.
      *
-     * Apenas estratégias com "enabled: true" são instanciadas.
-     * A ordem de construção define a ordem de avaliação no engine.
-     *
-     * @param strategies mapa de configurações por estratégia
-     * @return lista de estratégias habilitadas e configuradas
+     * @param strategies mapa de nome da estratégia para seus parâmetros de configuração
+     * @return lista de instâncias de estratégias habilitadas e configuradas
      */
     public List<TradingStrategy> build(Map<String, Map<String, Object>> strategies) {
         List<TradingStrategy> list = new ArrayList<>();
@@ -55,6 +55,10 @@ public class StrategyBuilder {
     // Builders individuais
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Constrói a {@link EmaRsiStrategy} a partir do bloco {@code emaRsi} do JSON.
+     * Combina cruzamento de EMAs rápida/lenta com filtro de RSI Wilder para geração de sinal.
+     */
     private void buildEmaRsi(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -71,6 +75,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link SupportResistanceStrategy} a partir do bloco {@code supportResistance}.
+     * Identifica zonas de suporte e resistência por clustering de múltiplos toques
+     * dentro de uma janela de lookback.
+     */
     private void buildSupportResistance(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -84,6 +93,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link PinBarStrategy} a partir do bloco {@code pinBar}.
+     * Detecta padrões de rejeição de preço (pin bars) com confirmação por zonas
+     * de suporte e resistência calculadas via ATR.
+     */
     private void buildPinBar(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -99,6 +113,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link BreakoutStrategy} a partir do bloco {@code breakout}.
+     * Sinaliza rompimento de máximas e mínimas da janela de lookback,
+     * com buffer percentual para evitar falsos rompimentos.
+     */
     private void buildBreakout(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -112,6 +131,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link BollingerMeanReversionStrategy} a partir do bloco
+     * {@code bollingerMeanReversion}. Utiliza desvio padrão amostral (N-1)
+     * e confirmação opcional via RSI Wilder.
+     */
     private void buildBollinger(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -130,6 +154,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link ZScoreMeanReversionStrategy} a partir do bloco
+     * {@code zScoreMeanReversion}. Utiliza desvio padrão populacional (N)
+     * para cálculo do Z-Score de distância da média.
+     */
     private void buildZScoreMeanReversion(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -143,6 +172,10 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a {@link KeltnerChannelStrategy} a partir do bloco {@code keltnerChannel}.
+     * Opera rompimentos do canal formado por EMA central com bandas baseadas em ATR.
+     */
     private void buildKeltner(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -158,6 +191,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a primeira instância de {@link DonchianBreakoutStrategy} a partir do
+     * bloco {@code donchianSystem1}. Configuração de curto prazo: entrada em 20 períodos
+     * e saída em 10 períodos, com expansão mínima de ATR de 5%.
+     */
     private void buildDonchian1(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -174,6 +212,11 @@ public class StrategyBuilder {
         ));
     }
 
+    /**
+     * Constrói a segunda instância de {@link DonchianBreakoutStrategy} a partir do
+     * bloco {@code donchianSystem2}. Configuração de longo prazo: entrada em 55 períodos
+     * e saída em 20 períodos, com expansão mínima de ATR de 10%.
+     */
     private void buildDonchian2(
             Map<String, Map<String, Object>> strategies,
             List<TradingStrategy> list
@@ -194,6 +237,14 @@ public class StrategyBuilder {
     // Helpers de leitura de configuração
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Verifica se uma estratégia está habilitada no mapa de configuração.
+     * Aceita tanto {@code Boolean} direto quanto representação textual {@code "true"}.
+     * Retorna {@code false} quando o mapa for nulo ou o campo {@code enabled} estiver ausente.
+     *
+     * @param cfg mapa de parâmetros da estratégia
+     * @return {@code true} se a estratégia estiver habilitada
+     */
     private boolean isEnabled(Map<String, Object> cfg) {
         if (cfg == null) return false;
         Object enabled = cfg.get("enabled");
@@ -201,6 +252,17 @@ public class StrategyBuilder {
         return enabled != null && "true".equalsIgnoreCase(enabled.toString());
     }
 
+    /**
+     * Lê um valor inteiro do mapa de configuração pelo nome da chave.
+     * Suporta valores do tipo {@link Number} e representação textual numérica.
+     * Retorna o valor padrão quando o mapa for nulo, a chave estiver ausente
+     * ou o valor não for conversível.
+     *
+     * @param cfg          mapa de parâmetros da estratégia
+     * @param key          nome da chave a ser lida
+     * @param defaultValue valor retornado em caso de ausência ou falha de conversão
+     * @return valor inteiro lido ou o padrão informado
+     */
     private int getInt(Map<String, Object> cfg, String key, int defaultValue) {
         if (cfg == null) return defaultValue;
         Object value = cfg.get(key);
@@ -214,6 +276,17 @@ public class StrategyBuilder {
         return defaultValue;
     }
 
+    /**
+     * Lê um valor decimal do mapa de configuração pelo nome da chave.
+     * Suporta valores do tipo {@link Number} e representação textual numérica.
+     * Retorna o valor padrão quando o mapa for nulo, a chave estiver ausente
+     * ou o valor não for conversível.
+     *
+     * @param cfg          mapa de parâmetros da estratégia
+     * @param key          nome da chave a ser lida
+     * @param defaultValue valor retornado em caso de ausência ou falha de conversão
+     * @return valor decimal lido ou o padrão informado
+     */
     private double getDouble(Map<String, Object> cfg, String key, double defaultValue) {
         if (cfg == null) return defaultValue;
         Object value = cfg.get(key);
@@ -227,6 +300,16 @@ public class StrategyBuilder {
         return defaultValue;
     }
 
+    /**
+     * Lê um valor booleano do mapa de configuração pelo nome da chave.
+     * Aceita tanto {@code Boolean} direto quanto a representação textual {@code "true"}.
+     * Retorna o valor padrão quando o mapa for nulo ou a chave estiver ausente.
+     *
+     * @param cfg          mapa de parâmetros da estratégia
+     * @param key          nome da chave a ser lida
+     * @param defaultValue valor retornado em caso de ausência
+     * @return valor booleano lido ou o padrão informado
+     */
     private boolean getBoolean(Map<String, Object> cfg, String key, boolean defaultValue) {
         if (cfg == null) return defaultValue;
         Object value = cfg.get(key);
