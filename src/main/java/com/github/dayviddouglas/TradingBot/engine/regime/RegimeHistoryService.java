@@ -21,51 +21,31 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Serviço responsável pela persistência de eventos de mudança de regime
- * e geração de relatório diário de comportamento de mercado por ativo.
+ * Responsável pela persistência de eventos de mudança de regime e pela geração
+ * do relatório diário unificado de comportamento de mercado por ativo.
  *
- * Responsabilidades:
- * - Serializar RegimeChangeEvent em arquivo JSON diário por ativo
- * - Calcular duração de cada regime (tempo real entre candles de mercado)
- * - Gerar bloco de resumo consolidado dentro do mesmo arquivo JSON
+ * Gera um único arquivo JSON por ativo por dia em um subdiretório separado por
+ * data dentro de {@code data/reports/{date}/},
+ * nomeado {@code regime_report_{symbol}_{date}.json}, contendo:
+ * <ul>
+ *   <li>{@code events}: lista de transições de regime com métricas técnicas e timestamps</li>
+ *   <li>{@code summary}: bloco calculado após cada transição com distribuição de regimes
+ *       em minutos, percentuais, regime atual e horário de início (fuso de Brasília)</li>
+ * </ul>
  *
- * Arquivo gerado por ativo por dia (v5.4.4):
- * - regime_report_{symbol}_{date}.json → dados técnicos + resumo unificado
+ * Os timestamps dos eventos utilizam o tempo real de mercado extraído do
+ * {@link RegimeChangeEvent#timestamp()}, que corresponde ao timestamp do último candle
+ * da janela de classificação. O {@link RegimeChangeEvent#processingTimestamp()} é mantido
+ * no JSON apenas como metadado de diagnóstico.
  *
- * Estrutura do arquivo JSON unificado:
- * {
- *   "symbol": "frxAUDUSD",
- *   "date": "2026-06-02",
- *   "events": [ ... ],
- *   "summary": {
- *     "totalMinutes": 135,
- *     "distribution": {
- *       "RANGING":  { "minutes": 58, "percent": 42.5 },
- *       "TRENDING": { "minutes": 45, "percent": 33.0 },
- *       "CHOPPY":   { "minutes": 32, "percent": 23.5 }
- *     },
- *     "currentRegime": "CHOPPY",
- *     "currentRegimeSince": "12:46"
- *   }
- * }
+ * As durações de cada regime são calculadas com base nos timestamps reais de mercado.
+ * Durante o warm-up histórico, a janela deslizante de 200 candles pode gerar timestamps
+ * com sobreposição, resultando em diferenças negativas entre eventos consecutivos.
+ * Nesses casos, {@code Math.max(0, minutes)} garante duração não-negativa sem mascarar
+ * o dado bruto.
  *
- * Atualização v5.4.3:
- * - Timestamps agora usam o tempo real de mercado (Bar.timestamp())
- *   em vez do Instant.now() do processamento.
- * - Campo durationMinutes calculado com base nos timestamps de mercado.
- * - Campo processingTimestamp mantido no JSON como metadado de diagnóstico.
- *
- * Atualização v5.4.4:
- * - Arquivo TXT removido. Resumo incorporado diretamente no JSON como
- *   bloco "summary" calculado após cada transição de regime.
- * - Duração negativa corrigida via Math.max(0, minutes) em vez de
- *   assumir ordenação garantida dos marketTimestamps durante o warm-up.
- * - Arquivo renomeado de regime_history_{symbol}_{date}.json para
- *   regime_report_{symbol}_{date}.json.
- *
- * Thread-safety:
- * synchronized em record() protege contra escritas concorrentes de
- * múltiplos símbolos confirmando transição quase simultaneamente.
+ * O método {@link #record} é {@code synchronized} para proteger contra escritas
+ * concorrentes de múltiplos símbolos confirmando transição quase simultaneamente.
  */
 @Service
 public class RegimeHistoryService {
@@ -73,17 +53,23 @@ public class RegimeHistoryService {
     private static final Logger log =
             LoggerFactory.getLogger(RegimeHistoryService.class);
 
+    /** Fuso horário utilizado para exibição de timestamps no relatório. */
     private static final ZoneId ZONE =
             ZoneId.of("America/Sao_Paulo");
 
+    /** Formatador para o campo {@code currentRegimeSince} no resumo. */
     private static final DateTimeFormatter TIME_FMT =
             DateTimeFormatter.ofPattern("HH:mm");
 
+    /** Diretório raiz de saída dos arquivos de relatório de regime. */
     private static final Path REPORT_DIR =
             Path.of("data", "reports");
 
     private final ObjectMapper mapper;
 
+    /**
+     * Inicializa o serviço com um {@link ObjectMapper} configurado para saída indentada.
+     */
     public RegimeHistoryService() {
         this.mapper = new ObjectMapper()
                 .enable(SerializationFeature.INDENT_OUTPUT);
@@ -94,29 +80,26 @@ public class RegimeHistoryService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Persiste um evento de mudança de regime e atualiza o relatório.
+     * Persiste um evento de mudança de regime confirmada e atualiza o relatório JSON do dia.
+     * Carrega os eventos existentes do arquivo, calcula a duração do regime anterior,
+     * adiciona o novo evento e regrava o arquivo completo com o bloco {@code summary} atualizado.
      *
-     * Usa event.timestamp() como tempo real de mercado para durações.
-     * Usa event.processingTimestamp() como metadado técnico no JSON.
-     *
-     * @param event evento de mudança de regime confirmada
+     * @param event evento de mudança de regime confirmado pelo {@link RegimeStateTracker}
      */
     public synchronized void record(RegimeChangeEvent event) {
         try {
-            Files.createDirectories(REPORT_DIR);
+            LocalDate date    = event.timestamp().atZone(ZONE).toLocalDate();
+            Path      dateDir = resolveDateDir(date);
 
-            LocalDate date = event.timestamp()
-                    .atZone(ZONE)
-                    .toLocalDate();
+            Files.createDirectories(dateDir);
 
-            Path reportFile = resolveReportPath(event.symbol(), date);
+            Path reportFile = resolveReportPath(event.symbol(), date, dateDir);
 
             List<Map<String, Object>> events = loadExistingEvents(reportFile);
 
-            // Calcula duração do regime anterior usando tempo de mercado.
-            // Math.max(0, ...) garante que durações negativas — possíveis
-            // durante o warm-up histórico por sobreposição de janelas —
-            // sejam tratadas como zero em vez de valores inválidos.
+            // Calcula a duração do regime anterior usando o timestamp de mercado do novo evento.
+            // Math.max(0, ...) trata durações negativas — possíveis durante o warm-up
+            // por sobreposição de janelas deslizantes — como zero.
             updatePreviousRegimeDuration(events, event.timestamp());
 
             events.add(toJsonMap(event));
@@ -139,21 +122,32 @@ public class RegimeHistoryService {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Resolução de diretório por data
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Resolve o subdiretório de relatórios para a data informada.
+     * Os arquivos de cada dia são organizados em {@code data/reports/{date}/}.
+     *
+     * @param date data do relatório no fuso de Brasília
+     * @return caminho do diretório correspondente à data
+     */
+    private Path resolveDateDir(LocalDate date) {
+        return REPORT_DIR.resolve(date.toString());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Construção do relatório unificado
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Constrói o Map raiz do relatório JSON unificado.
-     *
-     * Estrutura:
-     * - symbol, date: identificação do relatório
-     * - events: lista de transições de regime com métricas técnicas
-     * - summary: bloco calculado com distribuição e regime atual
+     * Constrói o mapa raiz do relatório JSON unificado com os campos
+     * {@code symbol}, {@code date}, {@code summary} e {@code events}.
      *
      * @param symbol símbolo do ativo
      * @param date   data do relatório
-     * @param events lista de eventos de transição já serializada
-     * @return Map pronto para serialização JSON
+     * @param events lista de eventos de transição já serializada em mapas
+     * @return mapa pronto para serialização JSON
      */
     private Map<String, Object> buildReport(
             String symbol,
@@ -170,15 +164,18 @@ public class RegimeHistoryService {
     }
 
     /**
-     * Calcula o bloco de resumo com distribuição de regimes e regime atual.
+     * Calcula o bloco {@code summary} com distribuição de regimes em minutos
+     * e percentuais, regime atual e horário de início no fuso de Brasília.
      *
-     * Distribuição calculada com base nas durações reais de mercado.
-     * O regime atual usa o tempo decorrido desde o marketTimestamp
-     * do último evento até o momento da geração do relatório.
+     * Para o último evento da lista, a duração é calculada como o tempo decorrido
+     * desde o {@code marketTimestamp} do evento até o momento da geração do relatório,
+     * representando o tempo em que o regime atual permanece ativo.
+     * Os demais eventos utilizam o campo {@code durationMinutes} já calculado.
+     * A distribuição é ordenada do regime mais frequente para o menos frequente.
      *
-     * @param events lista de eventos serializada
-     * @return Map com totalMinutes, distribution, currentRegime,
-     *         currentRegimeSince
+     * @param events lista de eventos de transição serializada
+     * @return mapa com {@code totalMinutes}, {@code distribution},
+     *         {@code currentRegime} e {@code currentRegimeSince}
      */
     private Map<String, Object> buildSummary(
             List<Map<String, Object>> events
@@ -186,9 +183,9 @@ public class RegimeHistoryService {
         Map<String, Object> summary = new LinkedHashMap<>();
 
         if (events.isEmpty()) {
-            summary.put("totalMinutes",      0L);
-            summary.put("distribution",      Map.of());
-            summary.put("currentRegime",     null);
+            summary.put("totalMinutes",       0L);
+            summary.put("distribution",       Map.of());
+            summary.put("currentRegime",      null);
             summary.put("currentRegimeSince", null);
             return summary;
         }
@@ -205,6 +202,7 @@ public class RegimeHistoryService {
             String              regime = (String) event.get("currentRegime");
             boolean             isLast = (i == events.size() - 1);
 
+            // Para o último evento, calcula o tempo decorrido desde o início do regime atual
             long minutes = isLast
                     ? calcOngoingMinutesFromMarket(event)
                     : toLong(event.get("durationMinutes"));
@@ -213,7 +211,7 @@ public class RegimeHistoryService {
             totalMinutes += minutes;
         }
 
-        // Bloco distribution — ordenado do mais frequente para o menos
+        // Distribuição ordenada do regime mais frequente para o menos frequente
         Map<String, Object> distribution = new LinkedHashMap<>();
         long finalTotal = totalMinutes;
 
@@ -233,9 +231,8 @@ public class RegimeHistoryService {
                     distribution.put(regime, entry);
                 });
 
-        // Regime atual
         Map<String, Object> lastEvent = events.get(events.size() - 1);
-        String currentRegime     = (String) lastEvent.get("currentRegime");
+        String currentRegime      = (String) lastEvent.get("currentRegime");
         String currentRegimeSince = formatMarketTime(
                 lastEvent.get("marketTimestampBrasilia"));
 
@@ -252,17 +249,15 @@ public class RegimeHistoryService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Atualiza a duração do último evento com base no timestamp
-     * de mercado do próximo regime.
+     * Atualiza o campo {@code durationMinutes} do último evento da lista
+     * com base no timestamp de mercado do início do próximo regime.
      *
-     * Durante o warm-up histórico, a janela deslizante de 200 candles
-     * pode gerar marketTimestamps com sobreposição, resultando em
-     * diferença negativa entre eventos consecutivos.
-     * Math.max(0, minutes) trata esse caso como duração zero,
-     * preservando a integridade do relatório sem mascarar o dado bruto.
+     * Quando a lista está vazia ou o timestamp anterior for inválido, retorna sem modificar.
+     * {@code Math.max(0, minutes)} garante duração não-negativa para casos de sobreposição
+     * de janelas durante o warm-up histórico.
      *
-     * @param events    lista de eventos existentes
-     * @param nextStart timestamp de mercado do início do próximo regime
+     * @param events    lista de eventos existentes; o último será atualizado
+     * @param nextStart timestamp de mercado do início do novo regime
      */
     private void updatePreviousRegimeDuration(
             List<Map<String, Object>> events,
@@ -276,12 +271,8 @@ public class RegimeHistoryService {
         if (prevTimestampStr == null) return;
 
         Instant prevStart = Instant.parse(prevTimestampStr);
-        long    minutes   = Duration.between(prevStart, nextStart)
-                .toMinutes();
+        long    minutes   = Duration.between(prevStart, nextStart).toMinutes();
 
-        // Garante duração não-negativa.
-        // Valores negativos ocorrem durante o warm-up por sobreposição
-        // de janelas deslizantes no replay do histórico.
         last.put("durationMinutes", Math.max(0L, minutes));
     }
 
@@ -290,15 +281,20 @@ public class RegimeHistoryService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Converte RegimeChangeEvent para Map para serialização JSON.
+     * Converte um {@link RegimeChangeEvent} para mapa para serialização JSON.
      *
-     * Campos de tempo:
-     * - marketTimestamp: tempo real do candle que gerou a confirmação
-     * - marketTimestampBrasilia: idem em horário de Brasília
-     * - processingTimestamp: quando o sistema processou (diagnóstico)
+     * Campos de tempo incluídos:
+     * <ul>
+     *   <li>{@code marketTimestamp}: tempo real de mercado em UTC</li>
+     *   <li>{@code marketTimestampBrasilia}: mesmo instante no fuso de Brasília</li>
+     *   <li>{@code dateBrasilia}: data local no fuso de Brasília</li>
+     *   <li>{@code processingTimestamp}: momento em que o sistema processou (diagnóstico)</li>
+     * </ul>
+     * O campo {@code durationMinutes} é inicializado como {@code null} e preenchido
+     * pelo próximo evento via {@link #updatePreviousRegimeDuration}.
      *
-     * @param event evento de mudança de regime
-     * @return Map pronto para serialização JSON
+     * @param event evento de mudança de regime a ser serializado
+     * @return mapa com todos os campos do evento pronto para serialização JSON
      */
     private Map<String, Object> toJsonMap(RegimeChangeEvent event) {
         Map<String, Object> map = new LinkedHashMap<>();
@@ -314,9 +310,9 @@ public class RegimeHistoryService {
         map.put("processingTimestamp",
                 event.processingTimestamp().toString());
 
-        map.put("symbol",         event.symbol());
-        map.put("previousRegime", event.previousRegime().name());
-        map.put("currentRegime",  event.currentRegime().name());
+        map.put("symbol",          event.symbol());
+        map.put("previousRegime",  event.previousRegime().name());
+        map.put("currentRegime",   event.currentRegime().name());
         map.put("durationMinutes", null);
 
         RegimeMetrics metrics = event.metrics();
@@ -335,14 +331,12 @@ public class RegimeHistoryService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Carrega a lista de eventos do arquivo JSON existente.
-     *
-     * Lê o campo "events" do relatório unificado se o arquivo já existir.
-     * Retorna lista vazia se o arquivo não existir ou o campo
-     * "events" não estiver presente.
+     * Carrega a lista de eventos do campo {@code events} do arquivo JSON existente.
+     * Retorna lista vazia quando o arquivo não existir ou o campo não estiver presente.
      *
      * @param reportFile caminho do arquivo de relatório
-     * @return lista mutável de eventos existentes
+     * @return lista mutável com os eventos existentes, pronta para receber novos itens
+     * @throws IOException se houver falha na leitura do arquivo
      */
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> loadExistingEvents(Path reportFile)
@@ -371,11 +365,12 @@ public class RegimeHistoryService {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Calcula minutos decorridos desde o marketTimestamp do regime
-     * atual até o momento da geração do relatório.
+     * Calcula os minutos decorridos desde o {@code marketTimestamp} do evento
+     * até o momento atual, representando o tempo em que o regime corrente está ativo.
+     * Retorna {@code 0} quando o timestamp for nulo ou inválido.
      *
-     * @param event mapa de dados do evento
-     * @return minutos decorridos, ou 0 se o timestamp for inválido
+     * @param event mapa de dados do último evento de regime
+     * @return minutos decorridos ou {@code 0} em caso de dado inválido
      */
     private long calcOngoingMinutesFromMarket(
             Map<String, Object> event
@@ -393,10 +388,12 @@ public class RegimeHistoryService {
     }
 
     /**
-     * Formata o timestamp de Brasília como HH:mm para o resumo.
+     * Formata o timestamp de Brasília como {@code HH:mm} para o campo
+     * {@code currentRegimeSince} do resumo.
+     * Retorna {@code "--:--"} quando o valor for nulo ou inválido.
      *
      * @param timestampBrasilia string ISO com offset de Brasília
-     * @return string HH:mm ou "--:--" se inválido
+     * @return horário formatado como {@code HH:mm} ou {@code "--:--"}
      */
     private String formatMarketTime(Object timestampBrasilia) {
         if (timestampBrasilia == null) return "--:--";
@@ -411,14 +408,30 @@ public class RegimeHistoryService {
         }
     }
 
+    /**
+     * Converte um valor de {@code Object} para {@code long}.
+     * Retorna {@code 0} quando o valor for nulo ou não for {@link Number}.
+     *
+     * @param value valor a converter
+     * @return valor como {@code long} ou {@code 0}
+     */
     private long toLong(Object value) {
         if (value == null) return 0L;
         if (value instanceof Number n) return n.longValue();
         return 0L;
     }
 
-    private Path resolveReportPath(String symbol, LocalDate date) {
-        return REPORT_DIR.resolve(
+    /**
+     * Resolve o caminho do arquivo de relatório de regime para o símbolo e data informados,
+     * dentro do subdiretório correspondente à data.
+     *
+     * @param symbol  símbolo do ativo
+     * @param date    data do relatório
+     * @param dateDir diretório de saída correspondente à data
+     * @return caminho completo do arquivo {@code regime_report_{symbol}_{date}.json}
+     */
+    private Path resolveReportPath(String symbol, LocalDate date, Path dateDir) {
+        return dateDir.resolve(
                 "regime_report_" + symbol + "_" + date + ".json");
     }
 }
