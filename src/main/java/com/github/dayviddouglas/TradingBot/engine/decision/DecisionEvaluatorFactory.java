@@ -3,48 +3,42 @@ package com.github.dayviddouglas.TradingBot.engine.decision;
 import com.github.dayviddouglas.TradingBot.engine.confluence.ConfluenceEvaluator;
 
 /**
- * Factory responsável por criar o DecisionEvaluator correto para cada DecisionMode.
+ * Responsável por criar o {@link DecisionEvaluator} correspondente ao {@link DecisionMode} informado.
  *
- * Centraliza a criação dos avaliadores, seguindo o princípio Open/Closed:
- * para adicionar um novo modo de decisão, basta:
- * 1. Criar a implementação de DecisionEvaluator
- * 2. Adicionar o case no switch desta factory
- * O StrategyEngine não precisa ser alterado.
+ * Centraliza a criação dos avaliadores, isolando o
+ * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine} das implementações concretas.
+ * Para adicionar um novo modo de decisão, basta criar a implementação de {@link DecisionEvaluator}
+ * e registrar o {@code case} correspondente no método {@link #create}, sem alterar o engine.
  *
- * Classe utilitária final (não instanciável):
- * - Construtor privado impede instanciação
- * - Método estático de fábrica acessível diretamente
+ * Os avaliadores são criados sem estado a cada chamada de {@link #create},
+ * o que é seguro pois todas as implementações atuais são stateless.
  *
- * ⚠️ Ponto de atenção: Os avaliadores são criados a cada chamada de create().
- * Como são instâncias sem estado (stateless), isso é seguro.
- * Se no futuro houver estado, considere cache ou injeção via Spring.
+ * Esta é uma classe utilitária final e não instanciável.
  */
 public final class DecisionEvaluatorFactory {
 
-    /**
-     * Construtor privado impede instanciação.
-     * Esta classe segue o padrão Utility Class / Static Factory.
-     */
     private DecisionEvaluatorFactory() {
     }
 
     /**
-     * Cria o avaliador de decisão correspondente ao modo especificado.
+     * Cria o {@link DecisionEvaluator} correspondente ao modo especificado.
      *
      * Mapeamento atual:
-     * - SINGLE_STRATEGY → SingleStrategyEvaluator
-     * - VOTING          → VotingEvaluator
-     * - CONFLUENCE      → ConfluenceEvaluator
+     * <ul>
+     *   <li>{@link DecisionMode#SINGLE_STRATEGY} → {@code SingleStrategyEvaluator}</li>
+     *   <li>{@link DecisionMode#VOTING} → {@code VotingEvaluator}</li>
+     *   <li>{@link DecisionMode#CONFLUENCE} → {@code ConfluenceEvaluator}</li>
+     * </ul>
      *
-     * @param mode modo de decisão configurado no strategies.json
-     * @return implementação de DecisionEvaluator correspondente
-     * @throws IllegalArgumentException se o modo não for suportado
+     * @param mode modo de decisão lido do strategies.json via {@link com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile}
+     * @return implementação de {@link DecisionEvaluator} correspondente ao modo
+     * @throws IllegalArgumentException se o modo não possuir implementação registrada
      */
     public static DecisionEvaluator create(DecisionMode mode) {
         return switch (mode) {
             case SINGLE_STRATEGY -> new SingleStrategyEvaluator();
-            case VOTING -> new VotingEvaluator();
-            case CONFLUENCE -> new ConfluenceEvaluator();
+            case VOTING          -> new VotingEvaluator();
+            case CONFLUENCE      -> new ConfluenceEvaluator();
         };
     }
 }

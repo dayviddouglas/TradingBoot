@@ -9,32 +9,30 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * Classificador de regime de mercado calibrado para candles de 1 minuto.
+ * Responsável por classificar o regime de mercado a partir de uma janela de candles.
  *
- * Recalibração v5.4:
- * Os thresholds originais tornavam TRENDING matematicamente impossível
- * em candles de 1 minuto por três razões:
+ * Aplica três detectores em sequência sobre os indicadores calculados:
+ * <ol>
+ *   <li><b>Efficiency Ratio</b> — mede a linearidade do movimento do preço
+ *       (Kaufman, 2013)</li>
+ *   <li><b>Distância entre EMAs</b> — mede a separação entre a EMA rápida e a lenta,
+ *       indicando presença ou ausência de momentum direcional</li>
+ *   <li><b>ATR Ratio</b> — compara a volatilidade recente com a histórica,
+ *       identificando compressão ou expansão de volatilidade</li>
+ * </ol>
  *
- * 1. EMA 20/50 gerava distância microscópica entre as linhas em 1min.
- *    Solução: EMA 8/21 — linhas mais responsivas, distância 3-4x maior.
+ * Os três detectores são avaliados conjuntamente para classificar o regime em:
+ * {@link MarketRegime#TRENDING}, {@link MarketRegime#RANGING} ou
+ * {@link MarketRegime#CHOPPY} (fallback quando nenhuma condição é satisfeita).
  *
- * 2. Limite de distância ATR × 0.60 era alto demais para 1min.
- *    Solução: ATR × 0.20 — calibrado para a escala real de 1min.
- *
- * 3. Efficiency Ratio limite 0.30 excluía 94% do tempo de mercado.
- *    Solução: 0.20 — captura tendências moderadas reais em 1min.
+ * Os parâmetros foram recalibrados para candles de 1 minuto:
+ * EMAs 8/21 substituem as anteriores 20/50, gerando distância 3-4x maior entre as linhas
+ * e tornando o detector de tendência funcional nessa granularidade.
+ * O Efficiency Ratio mínimo foi reduzido de 0.30 para 0.20, capturando tendências
+ * moderadas reais em gráficos de 1 minuto.
  *
  * Distribuição esperada após recalibração:
- *   TRENDING → ~15% do tempo (mercado com direção)
- *   RANGING  → ~40% do tempo (mercado lateral)
- *   CHOPPY   → ~45% do tempo (zona de transição)
- *
- * Referências:
- * - Kaufman, P.J. (2013). Trading Systems and Methods, 5th ed.
- * - Lo & MacKinlay (1988). Stock Market Prices do not Follow Random Walks.
- * - Elder, A. (1993). Trading For A Living.
- * - Murphy, J.J. (1999). Technical Analysis of the Financial Markets.
- * - Wilder, J.W. (1978). New Concepts in Technical Trading Systems.
+ * {@code TRENDING ~15%} | {@code RANGING ~40%} | {@code CHOPPY ~45%}
  */
 @Component
 public class MarketRegimeClassifier {
@@ -52,9 +50,8 @@ public class MarketRegimeClassifier {
     private final int emaSlowPeriod;
 
     /**
-     * Lookback do Efficiency Ratio.
-     * 30 períodos = 15% da janela de 200 candles.
-     * [Kaufman, 2013]
+     * Lookback do Efficiency Ratio: 30 períodos equivalem a 15% da janela de 200 candles.
+     * Captura a linearidade do movimento nos últimos 30 minutos em gráficos de 1 minuto.
      */
     private static final int EFFICIENCY_RATIO_LOOKBACK = 30;
 
@@ -63,60 +60,44 @@ public class MarketRegimeClassifier {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * ER mínimo para TRENDING.
-     *
-     * Significa: o preço precisa ter ido pelo menos 20% do caminho
-     * em linha reta nos últimos 30 minutos.
-     *
-     * Antes: 0.30 → só 6% do mercado atingia (TRENDING nunca aparecia)
-     * Depois: 0.20 → ~24% do mercado atinge (TRENDING aparece ~15%)
+     * ER mínimo para classificar como {@code TRENDING}.
+     * O preço deve ter percorrido pelo menos 20% do caminho em linha reta
+     * nos últimos 30 minutos.
      */
     private static final double ER_TRENDING_MIN = 0.20;
 
     /**
-     * ER máximo para RANGING.
-     *
-     * Significa: o preço ficou andando de lado, chegou a menos de
-     * 13% do caminho em linha reta nos últimos 30 minutos.
-     *
-     * Antes: 0.28 → absorvia toda zona de transição em RANGING
-     * Depois: 0.13 → RANGING real, cria zona CHOPPY funcional
+     * ER máximo para classificar como {@code RANGING}.
+     * O preço deve ter ficado dentro de uma faixa, com linearidade abaixo de 13%
+     * nos últimos 30 minutos.
      */
     private static final double ER_RANGING_MAX = 0.13;
 
     /**
-     * Fator de distância entre EMAs para TRENDING.
-     *
-     * Significa: a distância entre EMA8 e EMA21 precisa ser
-     * maior que 20% do tamanho médio dos candles (ATR).
-     *
-     * Antes: 0.60 → impossível com EMAs 20/50 em 1min
-     * Depois: 0.20 → alcançável com EMAs 8/21 em 1min
+     * Fator mínimo de distância entre EMAs para {@code TRENDING}.
+     * A distância entre EMA rápida e lenta deve superar 20% do ATR rápido,
+     * indicando separação suficiente para confirmar momentum direcional.
      */
     private static final double EMA_DISTANCE_TRENDING_FACTOR = 0.20;
 
     /**
-     * Fator de distância entre EMAs para RANGING.
-     *
-     * Significa: as EMAs precisam estar muito coladas —
-     * distância menor que 40% do tamanho médio dos candles.
-     *
-     * Antes: 0.75
-     * Depois: 0.40
+     * Fator máximo de distância entre EMAs para {@code RANGING}.
+     * As EMAs devem estar coladas — distância inferior a 40% do ATR rápido —
+     * indicando ausência de momentum direcional.
      */
     private static final double EMA_DISTANCE_RANGING_FACTOR = 0.40;
 
     /**
-     * ATR Ratio mínimo para TRENDING.
-     * Volatilidade atual pelo menos 90% da volatilidade histórica.
-     * Mercado ativo, não comprimido.
+     * ATR Ratio mínimo para {@code TRENDING}.
+     * A volatilidade recente deve ser pelo menos 90% da histórica,
+     * descartando períodos de compressão extrema.
      */
     private static final double ATR_RATIO_TRENDING_MIN = 0.90;
 
     /**
-     * ATR Ratio máximo para RANGING.
-     * Volatilidade atual no máximo 120% da histórica.
-     * Mercado estável, sem explosão de volatilidade.
+     * ATR Ratio máximo para {@code RANGING}.
+     * A volatilidade recente não pode exceder 120% da histórica,
+     * descartando expansões abruptas de volatilidade.
      */
     private static final double ATR_RATIO_RANGING_MAX = 1.20;
 
@@ -126,18 +107,8 @@ public class MarketRegimeClassifier {
 
     /**
      * Construtor padrão calibrado para candles de 1 minuto.
-     *
-     * EMAs atualizadas de 20/50 para 8/21:
-     *
-     * EMA 8  → média dos últimos 8 minutos  (rápida, segue o preço)
-     * EMA 21 → média dos últimos 21 minutos (lenta, referência)
-     *
-     * Com EMA 8/21 a distância entre as linhas é 3-4x maior
-     * do que com EMA 20/50 em gráficos de 1 minuto.
-     * Isso torna o Detector 2 funcional e discriminante.
-     *
-     * Antes: this(14, 50, 20, 50)
-     * Depois: this(14, 50, 8, 21)
+     * Utiliza EMA 8/21, que gera distância entre linhas 3-4x maior
+     * do que as anteriores EMA 20/50, tornando o detector de tendência funcional.
      */
     public MarketRegimeClassifier() {
         this(14, 50, 8, 21);
@@ -146,10 +117,10 @@ public class MarketRegimeClassifier {
     /**
      * Construtor parametrizável para testes e calibragem por ativo.
      *
-     * @param atrFastPeriod período do ATR curto (padrão: 14)
-     * @param atrBasePeriod período do ATR base (padrão: 50)
-     * @param emaFastPeriod período da EMA rápida (padrão: 8)
-     * @param emaSlowPeriod período da EMA lenta (padrão: 21)
+     * @param atrFastPeriod período do ATR rápido, usado para medir volatilidade recente
+     * @param atrBasePeriod período do ATR base, usado como referência histórica de volatilidade
+     * @param emaFastPeriod período da EMA rápida, usada para calcular a distância entre médias
+     * @param emaSlowPeriod período da EMA lenta, usada como referência de momentum
      */
     public MarketRegimeClassifier(
             int atrFastPeriod,
@@ -168,10 +139,11 @@ public class MarketRegimeClassifier {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Classifica o regime e retorna apenas o enum MarketRegime.
-     * Mantido para compatibilidade com WeightedConfluenceEvaluator.
+     * Classifica o regime e retorna apenas o {@link MarketRegime}.
+     * Mantido para compatibilidade com o
+     * {@link com.github.dayviddouglas.TradingBot.engine.confluence.WeightedConfluenceEvaluator}.
      *
-     * @param bars lista de candles para análise
+     * @param bars janela de candles para análise
      * @return regime classificado
      */
     public MarketRegime classify(List<Bar> bars) {
@@ -179,48 +151,30 @@ public class MarketRegimeClassifier {
     }
 
     /**
-     * Classifica o regime e retorna RegimeMetrics com todos os
-     * valores calculados para auditoria.
+     * Classifica o regime e retorna {@link RegimeMetrics} com todos os valores calculados.
      *
-     * As 3 perguntas do classificador:
+     * Os três detectores são avaliados na seguinte ordem:
+     * <ul>
+     *   <li><b>TRENDING</b>: ER {@code >=} 0.20 E distância entre EMAs {@code >} ATR × 0.20
+     *       E atrRatio {@code >=} 0.90 — as três condições devem ser verdadeiras</li>
+     *   <li><b>RANGING</b>: ER {@code <=} 0.13 E distância entre EMAs {@code <} ATR × 0.40
+     *       E atrRatio {@code <=} 1.20 — as três condições devem ser verdadeiras</li>
+     *   <li><b>CHOPPY</b>: fallback quando nenhuma das condições anteriores é satisfeita</li>
+     * </ul>
      *
-     * TRENDING (mercado com direção):
-     *   Pergunta 1: ER >= 0.20    (preço foi em linha reta?)
-     *   Pergunta 2: dist > ATR × 0.20  (EMAs separadas?)
-     *   Pergunta 3: atrRatio >= 0.90   (volatilidade normal?)
-     *   As 3 precisam ser SIM
+     * O {@code marketTimestamp} no {@link RegimeMetrics} retornado representa o timestamp
+     * do último candle da janela analisada, garantindo que os relatórios utilizem o tempo
+     * real de mercado da detecção em vez do tempo de processamento.
      *
-     * RANGING (mercado lateral):
-     *   Pergunta 1: ER <= 0.13    (preço ficou no lugar?)
-     *   Pergunta 2: dist < ATR × 0.40  (EMAs coladas?)
-     *   Pergunta 3: atrRatio <= 1.20   (volatilidade estável?)
-     *   As 3 precisam ser SIM
-     *
-     * CHOPPY (zona de transição):
-     *   Nenhuma das condições acima foi satisfeita
-     *
-     * @param bars lista de candles para análise
-     * @return RegimeMetrics com regime e indicadores calculados
-     */
-    /**
-     * Classifica o regime e retorna RegimeMetrics com todos os
-     * valores calculados para auditoria.
-     *
-     * Atualização v5.4.2:
-     * O timestamp do último candle da janela é incluído no RegimeMetrics
-     * como marketTimestamp. Esse valor representa o momento real de mercado
-     * da detecção, garantindo que os relatórios usem tempo de mercado
-     * em vez do Instant.now() do processamento.
-     *
-     * @param bars lista de candles para análise
-     * @return RegimeMetrics com regime, indicadores e timestamp de mercado
+     * @param bars janela de candles para análise; retorna {@code CHOPPY} com campos NaN
+     *             quando a quantidade de candles for insuficiente
+     * @return {@link RegimeMetrics} com regime classificado, indicadores calculados
+     *         e timestamp real de mercado
      */
     public RegimeMetrics classifyWithMetrics(List<Bar> bars) {
 
-        // Validação: precisa de candles suficientes
         if (bars == null
-                || bars.size() < Math.max(atrBasePeriod,
-                emaSlowPeriod) + 10) {
+                || bars.size() < Math.max(atrBasePeriod, emaSlowPeriod) + 10) {
             log.debug("REGIME CLASSIFIER | insufficient bars | size={}",
                     bars != null ? bars.size() : 0);
             return buildMetrics(
@@ -229,28 +183,22 @@ public class MarketRegimeClassifier {
                     null);
         }
 
-        // Timestamp do último candle da janela — representa o momento
-        // real de mercado em que esse regime foi detectado (v5.4.2)
+        // Timestamp do último candle — referência temporal real de mercado da detecção
         Instant marketTimestamp = bars.get(bars.size() - 1).timestamp();
 
-        // Calcula os 3 detectores
         double atrFast    = atr(bars, atrFastPeriod);
         double atrBase    = atr(bars, atrBasePeriod);
         double emaFast    = ema(bars, emaFastPeriod);
         double emaSlow    = ema(bars, emaSlowPeriod);
-        double efficiency = efficiencyRatio(bars,
-                EFFICIENCY_RATIO_LOOKBACK);
+        double efficiency = efficiencyRatio(bars, EFFICIENCY_RATIO_LOOKBACK);
 
-        // Validação: métricas precisam ser números válidos
         if (!Double.isFinite(atrFast) || !Double.isFinite(atrBase)
                 || !Double.isFinite(emaFast)
                 || !Double.isFinite(emaSlow)
                 || atrBase <= 0) {
             log.debug("REGIME CLASSIFIER | invalid metrics | "
-                            + "atrFast={} atrBase={} "
-                            + "emaFast={} emaSlow={} efficiency={}",
-                    atrFast, atrBase,
-                    emaFast, emaSlow, efficiency);
+                            + "atrFast={} atrBase={} emaFast={} emaSlow={} efficiency={}",
+                    atrFast, atrBase, emaFast, emaSlow, efficiency);
             return buildMetrics(
                     atrFast, atrBase,
                     Double.NaN, Double.NaN, efficiency,
@@ -260,7 +208,7 @@ public class MarketRegimeClassifier {
         double atrRatio    = atrFast / atrBase;
         double emaDistance = Math.abs(emaFast - emaSlow);
 
-        // ── Detector: TRENDING ──
+        // Detector TRENDING: movimento linear, EMAs separadas e volatilidade ativa
         if (efficiency >= ER_TRENDING_MIN
                 && emaDistance > atrFast * EMA_DISTANCE_TRENDING_FACTOR
                 && atrRatio >= ATR_RATIO_TRENDING_MIN) {
@@ -274,7 +222,7 @@ public class MarketRegimeClassifier {
                     marketTimestamp);
         }
 
-        // ── Detector: RANGING ──
+        // Detector RANGING: movimento lateral, EMAs coladas e volatilidade estável
         if (efficiency <= ER_RANGING_MAX
                 && emaDistance < atrFast * EMA_DISTANCE_RANGING_FACTOR
                 && atrRatio <= ATR_RATIO_RANGING_MAX) {
@@ -288,7 +236,7 @@ public class MarketRegimeClassifier {
                     marketTimestamp);
         }
 
-        // ── Fallback: CHOPPY ──
+        // Fallback CHOPPY: nenhum padrão estrutural identificado
         log.debug("REGIME CLASSIFIER | regime=CHOPPY | "
                         + "efficiency={} emaDistance={} atrRatio={}",
                 efficiency, emaDistance, atrRatio);
@@ -303,14 +251,15 @@ public class MarketRegimeClassifier {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * ATR — Tamanho médio dos candles nos últimos N períodos.
+     * Calcula o Average True Range (ATR) dos últimos {@code period} candles.
+     * O True Range de cada candle é o maior entre:
+     * {@code high - low}, {@code |high - close anterior|} e {@code |low - close anterior|}.
+     * O primeiro candle da janela usa apenas {@code high - low} por não ter candle anterior.
+     * Retorna {@code NaN} quando há menos candles disponíveis que o período.
      *
-     * Para cada candle calcula o tamanho real (True Range):
-     *   TR = Máxima - Mínima (ou diferença com fechamento anterior)
-     *
-     * ATR = média de todos os TR dos últimos N candles.
-     *
-     * [Wilder, 1978]
+     * @param bars   lista de candles
+     * @param period número de candles para o cálculo
+     * @return ATR calculado ou {@code NaN} se dados insuficientes
      */
     private static double atr(List<Bar> bars, int period) {
         if (bars.size() < period) return Double.NaN;
@@ -321,16 +270,14 @@ public class MarketRegimeClassifier {
             double tr;
 
             if (i == bars.size() - period) {
+                // Primeiro candle da janela: sem candle anterior disponível
                 tr = current.high() - current.low();
             } else {
                 Bar    previous  = bars.get(i - 1);
                 double highLow   = current.high() - current.low();
-                double highClose = Math.abs(
-                        current.high() - previous.close());
-                double lowClose  = Math.abs(
-                        current.low() - previous.close());
-                tr = Math.max(highLow,
-                        Math.max(highClose, lowClose));
+                double highClose = Math.abs(current.high() - previous.close());
+                double lowClose  = Math.abs(current.low()  - previous.close());
+                tr = Math.max(highLow, Math.max(highClose, lowClose));
             }
 
             sum += tr;
@@ -340,16 +287,14 @@ public class MarketRegimeClassifier {
     }
 
     /**
-     * EMA — Média móvel exponencial com mais peso para preços recentes.
+     * Calcula a Exponential Moving Average (EMA) sobre os fechamentos dos candles.
+     * Inicializa com a média simples dos primeiros {@code period} candles e aplica
+     * suavização exponencial com fator {@code k = 2 / (period + 1)} nos candles seguintes.
+     * Retorna {@code NaN} quando há menos candles disponíveis que o período.
      *
-     * Fórmula:
-     *   fator = 2 ÷ (período + 1)
-     *   EMA hoje = (preço hoje × fator) + (EMA ontem × (1 - fator))
-     *
-     * Começa com a média simples dos primeiros N candles
-     * e aplica a fórmula exponencial nos candles seguintes.
-     *
-     * [Appel, 2005]
+     * @param bars   lista de candles
+     * @param period número de candles para o cálculo
+     * @return EMA calculada ou {@code NaN} se dados insuficientes
      */
     private static double ema(List<Bar> bars, int period) {
         if (bars.size() < period) return Double.NaN;
@@ -357,13 +302,13 @@ public class MarketRegimeClassifier {
         double k   = 2.0 / (period + 1.0);
         double ema = 0.0;
 
-        // Seed: média simples dos primeiros N candles
+        // Seed: média simples dos primeiros N fechamentos
         for (int i = 0; i < period; i++) {
             ema += bars.get(i).close();
         }
         ema /= period;
 
-        // Aplica suavização exponencial nos candles restantes
+        // Suavização exponencial nos candles restantes
         for (int i = period; i < bars.size(); i++) {
             ema = bars.get(i).close() * k + ema * (1.0 - k);
         }
@@ -372,34 +317,29 @@ public class MarketRegimeClassifier {
     }
 
     /**
-     * Efficiency Ratio — O preço foi em linha reta ou ficou
-     * indo e voltando?
+     * Calcula o Efficiency Ratio (ER) sobre os últimos {@code lookback} candles.
+     * O ER mede a linearidade do movimento: razão entre a distância líquida percorrida
+     * em linha reta e a soma total dos passos individuais (sem considerar direção).
+     * {@code ER = 1.0} indica tendência perfeita; {@code ER = 0.0} indica retorno ao ponto inicial.
+     * Retorna {@code 0.0} quando há dados insuficientes ou o movimento total é zero.
      *
-     * Fórmula:
-     *   ER = distância em linha reta ÷ total de passos dados
-     *
-     * Resultado:
-     *   ER = 1.0 → foi em linha reta (tendência perfeita)
-     *   ER = 0.0 → voltou ao ponto de partida (lateral)
-     *
-     * [Kaufman, 2013]
+     * @param bars     lista de candles
+     * @param lookback número de candles para o cálculo
+     * @return ER entre 0.0 e 1.0
      */
-    private static double efficiencyRatio(List<Bar> bars,
-                                          int lookback) {
+    private static double efficiencyRatio(List<Bar> bars, int lookback) {
         if (bars.size() < lookback + 1) return 0.0;
 
-        int    start     = bars.size() - 1 - lookback;
-        int    end       = bars.size() - 1;
+        int    start    = bars.size() - 1 - lookback;
+        int    end      = bars.size() - 1;
 
-        // Distância em linha reta do início ao fim
-        double netMove   = Math.abs(
-                bars.get(end).close() - bars.get(start).close());
+        // Distância líquida: do ponto de partida ao ponto final em linha reta
+        double netMove  = Math.abs(bars.get(end).close() - bars.get(start).close());
 
-        // Soma de todos os passos dados (sem importar direção)
+        // Soma de todos os passos individuais independentemente da direção
         double totalMove = 0.0;
         for (int i = start + 1; i <= end; i++) {
-            totalMove += Math.abs(
-                    bars.get(i).close() - bars.get(i - 1).close());
+            totalMove += Math.abs(bars.get(i).close() - bars.get(i - 1).close());
         }
 
         if (totalMove == 0.0) return 0.0;
@@ -411,15 +351,18 @@ public class MarketRegimeClassifier {
     // Factory de RegimeMetrics
     // ═══════════════════════════════════════════════════════════════
 
-    // ═══════════════════════════════════════════════════════════════
-    // Factory de RegimeMetrics — atualizado v5.4.2
-    // ═══════════════════════════════════════════════════════════════
-
     /**
-     * Constrói RegimeMetrics com todos os campos incluindo
-     * o timestamp de mercado do último candle analisado.
+     * Constrói um {@link RegimeMetrics} com todos os valores calculados
+     * e o timestamp real de mercado do último candle analisado.
      *
-     * @param marketTimestamp timestamp do último candle da janela
+     * @param atrFast         ATR rápido calculado
+     * @param atrBase         ATR base calculado
+     * @param atrRatio        razão entre ATR rápido e ATR base
+     * @param emaDistance     distância absoluta entre EMA rápida e lenta
+     * @param efficiency      Efficiency Ratio calculado
+     * @param regime          regime classificado pelos detectores
+     * @param marketTimestamp timestamp do último candle da janela analisada
+     * @return {@link RegimeMetrics} imutável com todos os campos
      */
     private static RegimeMetrics buildMetrics(
             double atrFast,

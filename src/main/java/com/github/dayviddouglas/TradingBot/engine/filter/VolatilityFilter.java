@@ -7,64 +7,47 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 
 /**
- * Filtro de volatilidade que impede operações quando o mercado está muito parado.
+ * Filtro de volatilidade que impede operações quando o mercado está com movimento insuficiente.
  *
- * Compara o range (high - low) do candle atual com o range médio dos últimos
- * N candles. Se o range atual for menor que avgRange × rangeMultiplier,
- * o candle é considerado sem movimento suficiente para operar.
+ * Compara o range ({@code high - low}) do candle mais recente com o range médio dos últimos
+ * {@code rangeLookback} candles. Quando o range atual for inferior a
+ * {@code avgRange × rangeMultiplier}, o candle é considerado sem volatilidade suficiente
+ * para operar, protegendo contra sinais gerados em períodos de baixa liquidez.
  *
- * Isso protege contra sinais gerados em períodos de baixa liquidez
- * (madrugada, feriados, etc.), onde os spreads podem ser ruins e os
- * movimentos erráticos.
- *
- * Os parâmetros são configuráveis via strategies.json no bloco "engine":
+ * Os parâmetros são configuráveis por ativo via strategies.json no bloco {@code engine}:
+ * <pre>
  * {
  *   "engine": {
- *     "maxBars": 1500,
- *     "decisionMode": "VOTING",
  *     "rangeLookback": 14,
  *     "rangeMultiplier": 1.10
  *   }
  * }
+ * </pre>
  *
- * Classe extraída do StrategyEngine para:
- * - Respeitar SRP (Single Responsibility Principle)
- * - Permitir reutilização em outros contextos (ex: backtest)
- * - Facilitar testes unitários isolados
- * - Permitir evolução independente da lógica de filtro
- *
- * ⚠️ Ponto de atenção: Os valores padrão (rangeLookback=14, rangeMultiplier=1.10)
- * são os mesmos que estavam hardcoded no StrategyEngine, garantindo compatibilidade
- * retroativa com profiles que não configuram esses campos.
+ * Quando os campos não estão configurados, os valores padrão
+ * ({@code rangeLookback=14}, {@code rangeMultiplier=1.10}) são aplicados,
+ * mantendo compatibilidade retroativa com profiles existentes.
  */
 public class VolatilityFilter {
 
     private static final Logger log = LoggerFactory.getLogger(VolatilityFilter.class);
 
-    /**
-     * Valor padrão do rangeLookback.
-     * Mantém compatibilidade com profiles que não configuram este campo.
-     */
-    private static final int DEFAULT_RANGE_LOOKBACK = 14;
+    /** Valor padrão do lookback para cálculo do range médio. */
+    private static final int    DEFAULT_RANGE_LOOKBACK   = 14;
 
-    /**
-     * Valor padrão do rangeMultiplier.
-     * Mantém compatibilidade com profiles que não configuram este campo.
-     */
+    /** Valor padrão do multiplicador mínimo de volatilidade. */
     private static final double DEFAULT_RANGE_MULTIPLIER = 1.10;
 
     /**
-     * Quantidade de candles usados para calcular o range médio.
-     * Padrão: 14 (valor clássico para ATR e filtros de volatilidade).
-     * Configurável via strategies.json campo "rangeLookback".
+     * Quantidade de candles utilizados para calcular o range médio de referência.
+     * Configurável via strategies.json; substituído pelo padrão quando inválido.
      */
     private final int rangeLookback;
 
     /**
-     * Multiplicador de volatilidade mínima.
-     * O range atual deve ser >= avgRange × rangeMultiplier para operar.
-     * Padrão: 1.10 (candle atual precisa de pelo menos 110% do range médio).
-     * Configurável via strategies.json campo "rangeMultiplier".
+     * Multiplicador aplicado sobre o range médio para definir o limiar mínimo.
+     * O range atual deve ser {@code >= avgRange × rangeMultiplier} para operar.
+     * Configurável via strategies.json; substituído pelo padrão quando inválido.
      */
     private final double rangeMultiplier;
 
@@ -78,28 +61,25 @@ public class VolatilityFilter {
 
     /**
      * Construtor com parâmetros configuráveis.
+     * Valores zero ou negativos são substituídos pelos padrões,
+     * garantindo que o filtro nunca opere com configuração inválida.
      *
-     * Valores inválidos (zero ou negativos) são substituídos pelos padrões,
-     * garantindo que o filtro nunca opere com configuração absurda.
-     *
-     * @param rangeLookback quantidade de candles para calcular range médio (> 0)
-     * @param rangeMultiplier multiplicador mínimo de volatilidade (> 0)
+     * @param rangeLookback   quantidade de candles para o cálculo do range médio; deve ser positivo
+     * @param rangeMultiplier multiplicador mínimo de volatilidade; deve ser positivo
      */
     public VolatilityFilter(int rangeLookback, double rangeMultiplier) {
-        this.rangeLookback = rangeLookback > 0 ? rangeLookback : DEFAULT_RANGE_LOOKBACK;
+        this.rangeLookback   = rangeLookback   > 0 ? rangeLookback   : DEFAULT_RANGE_LOOKBACK;
         this.rangeMultiplier = rangeMultiplier > 0 ? rangeMultiplier : DEFAULT_RANGE_MULTIPLIER;
     }
 
     /**
-     * Verifica se a volatilidade atual é suficiente para operar.
+     * Verifica se a volatilidade do candle mais recente é suficiente para operar.
+     * Calcula o range médio dos últimos {@code rangeLookback} candles e compara
+     * com o range do último candle. Registra log de diagnóstico quando bloqueado.
      *
-     * Calcula o range médio dos últimos rangeLookback candles e compara
-     * com o range do candle atual. Se o candle atual não atingir o
-     * threshold mínimo, o mercado é considerado parado.
-     *
-     * @param snapshot cópia imutável dos candles atuais
-     * @param symbol símbolo do ativo para log de diagnóstico
-     * @return true se a volatilidade é aceitável para operar
+     * @param snapshot cópia imutável dos candles atuais; não pode ser nulo ou vazio
+     * @param symbol   símbolo do ativo, utilizado apenas para o log de diagnóstico
+     * @return {@code true} se o range atual atingir o limiar mínimo configurado
      */
     public boolean isAcceptable(List<Bar> snapshot, String symbol) {
         if (snapshot == null || snapshot.isEmpty()) return false;
@@ -119,10 +99,12 @@ public class VolatilityFilter {
     }
 
     /**
-     * Retorna o range (high - low) do último candle do snapshot.
+     * Retorna o range ({@code high - low}) do último candle do snapshot.
+     * Utilizado pelo {@link com.github.dayviddouglas.TradingBot.engine.core.SignalEmitter}
+     * para incluir na metadata do sinal final.
      *
-     * @param snapshot lista de candles
-     * @return range do último candle ou 0.0 se snapshot vazio
+     * @param snapshot lista de candles; retorna {@code 0.0} se nula ou vazia
+     * @return range do último candle
      */
     public double getCurrentRange(List<Bar> snapshot) {
         if (snapshot == null || snapshot.isEmpty()) return 0.0;
@@ -130,36 +112,47 @@ public class VolatilityFilter {
     }
 
     /**
-     * Retorna o range médio dos últimos rangeLookback candles.
+     * Retorna o range médio dos últimos {@code rangeLookback} candles.
+     * Utilizado pelo {@link com.github.dayviddouglas.TradingBot.engine.core.SignalEmitter}
+     * para incluir na metadata do sinal final.
      *
      * @param snapshot lista de candles
-     * @return range médio ou NaN se dados insuficientes
+     * @return range médio ou {@code NaN} se há menos candles que {@code rangeLookback}
      */
     public double getAverageRange(List<Bar> snapshot) {
         return computeAverageRange(snapshot);
     }
 
-    /** Retorna o rangeLookback configurado */
+    /**
+     * Retorna o {@code rangeLookback} configurado.
+     *
+     * @return número de candles utilizados no cálculo do range médio
+     */
     public int getRangeLookback() { return rangeLookback; }
 
-    /** Retorna o rangeMultiplier configurado */
+    /**
+     * Retorna o {@code rangeMultiplier} configurado.
+     *
+     * @return multiplicador mínimo de volatilidade aplicado sobre o range médio
+     */
     public double getRangeMultiplier() { return rangeMultiplier; }
 
     /**
-     * Calcula o range (high - low) de um candle.
+     * Calcula o range ({@code high - low}) de um candle individual.
      *
-     * @param bar candle a calcular
-     * @return range do candle
+     * @param bar candle a ser calculado
+     * @return diferença entre {@code high} e {@code low}
      */
     private double computeRange(Bar bar) {
         return bar.high() - bar.low();
     }
 
     /**
-     * Calcula o range médio (high - low) dos últimos rangeLookback candles.
+     * Calcula o range médio dos últimos {@code rangeLookback} candles da lista.
+     * Retorna {@code NaN} quando há menos candles disponíveis que o lookback configurado.
      *
-     * @param bars lista de candles
-     * @return range médio ou NaN se dados insuficientes
+     * @param bars lista de candles; pode ser nula
+     * @return média dos ranges ou {@code NaN} se dados insuficientes
      */
     private double computeAverageRange(List<Bar> bars) {
         if (bars == null || bars.size() < rangeLookback) return Double.NaN;

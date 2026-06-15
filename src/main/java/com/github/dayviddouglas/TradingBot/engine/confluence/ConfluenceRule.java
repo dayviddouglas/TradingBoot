@@ -3,23 +3,24 @@ package com.github.dayviddouglas.TradingBot.engine.confluence;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 
 /**
- * Encapsula as regras de validação da decisão de confluência.
+ * Encapsula os critérios de validação da decisão de confluência ponderada.
  *
- * Define os critérios mínimos que devem ser satisfeitos para que
- * o WeightedConfluenceEvaluator emita um sinal final.
+ * Define os três limiares que devem ser simultaneamente satisfeitos para que o
+ * {@link WeightedConfluenceEvaluator} emita um sinal operacional:
+ * <ol>
+ *   <li>Score da direção predominante {@code >=} {@code minDecisionScore}</li>
+ *   <li>Score da direção oposta {@code <=} {@code maxOppositeScore}</li>
+ *   <li>Quantidade de votos na direção predominante {@code >=} {@code minStrategiesInDirection}</li>
+ * </ol>
  *
- * Critérios (tripla validação):
- * 1. Score da direção >= minDecisionScore
- * 2. Score da direção oposta <= maxOppositeScore
- * 3. Quantidade de votos na direção >= minStrategiesInDirection
+ * A instância {@link #DEFAULT} é calibrada para o estado atual do projeto:
+ * com 2 estratégias de reversão em regime {@code RANGING} (peso 1.4 cada),
+ * ambas precisam votar na mesma direção para atingir o score mínimo de 2.4.
+ * Um único voto resulta em score 1.4, abaixo do limiar, e nenhum sinal é emitido.
  *
- * Extraído do WeightedConfluenceEvaluator para respeitar SRP:
- * - WeightedConfluenceEvaluator orquestra a avaliação
- * - ConfluenceRule define e verifica os critérios de decisão
- *
- * @param minDecisionScore         score mínimo para aceitar sinal
- * @param maxOppositeScore         score máximo permitido do lado oposto
- * @param minStrategiesInDirection mínimo de estratégias na direção final
+ * @param minDecisionScore         score mínimo necessário na direção predominante
+ * @param maxOppositeScore         score máximo tolerado na direção oposta
+ * @param minStrategiesInDirection quantidade mínima de estratégias votando na direção final
  */
 public record ConfluenceRule(
         double minDecisionScore,
@@ -28,19 +29,18 @@ public record ConfluenceRule(
 ) {
     /**
      * Regra padrão calibrada para o estado atual do projeto.
-     *
-     * Com 2 estratégias de reversão em RANGING (peso 1.4 cada):
-     * - Ambas BUY: buyScore = 2.8 ≥ 2.4 ✅
-     * - Apenas uma BUY: buyScore = 1.4 < 2.4 ❌
+     * Com 2 estratégias de reversão em {@code RANGING} (peso 1.4 cada):
+     * ambas {@code BUY} resultam em {@code buyScore = 2.8 >= 2.4} (aprovado);
+     * apenas uma {@code BUY} resulta em {@code buyScore = 1.4 < 2.4} (rejeitado).
      */
     public static final ConfluenceRule DEFAULT =
             new ConfluenceRule(2.4, 0.9, 2);
 
     /**
-     * Verifica se os scores atendem aos critérios para BUY.
+     * Verifica se os scores e contagens do acumulador atendem aos critérios para emitir sinal {@code BUY}.
      *
-     * @param accumulator acumulador com scores e contagens
-     * @return true se pode emitir sinal BUY
+     * @param accumulator acumulador com scores e contagens de votos por direção
+     * @return {@code true} se os três critérios de BUY forem satisfeitos simultaneamente
      */
     public boolean isBuyValid(ScoreAccumulator accumulator) {
         return accumulator.getBuyScore() >= minDecisionScore
@@ -49,10 +49,10 @@ public record ConfluenceRule(
     }
 
     /**
-     * Verifica se os scores atendem aos critérios para SELL.
+     * Verifica se os scores e contagens do acumulador atendem aos critérios para emitir sinal {@code SELL}.
      *
-     * @param accumulator acumulador com scores e contagens
-     * @return true se pode emitir sinal SELL
+     * @param accumulator acumulador com scores e contagens de votos por direção
+     * @return {@code true} se os três critérios de SELL forem satisfeitos simultaneamente
      */
     public boolean isSellValid(ScoreAccumulator accumulator) {
         return accumulator.getSellScore() >= minDecisionScore
@@ -61,13 +61,13 @@ public record ConfluenceRule(
     }
 
     /**
-     * Resolve o tipo final do sinal aplicando as regras de decisão.
+     * Resolve o tipo final do sinal aplicando os critérios de {@code BUY} e {@code SELL} em sequência.
+     * {@code BUY} tem prioridade sobre {@code SELL} em caso de empate, situação improvável
+     * dado o critério de {@code maxOppositeScore} que limita o score da direção oposta.
      *
-     * Prioridade: BUY sobre SELL em caso de empate (situação improvável
-     * dado o critério de maxOppositeScore).
-     *
-     * @param accumulator acumulador com scores e contagens
-     * @return tipo final do sinal ou NONE se nenhuma condição for satisfeita
+     * @param accumulator acumulador com scores e contagens de votos por direção
+     * @return {@link Signal.Type#BUY} ou {@link Signal.Type#SELL} se os critérios forem atingidos,
+     *         {@link Signal.Type#NONE} caso contrário
      */
     public Signal.Type resolve(ScoreAccumulator accumulator) {
         if (isBuyValid(accumulator)) return Signal.Type.BUY;
@@ -76,7 +76,9 @@ public record ConfluenceRule(
     }
 
     /**
-     * Retorna descrição dos parâmetros para logs de diagnóstico.
+     * Formata os parâmetros desta regra em string compacta para logs de diagnóstico.
+     *
+     * @return string formatada com os três parâmetros da regra
      */
     public String toLogString() {
         return String.format(

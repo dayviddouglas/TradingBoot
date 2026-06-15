@@ -12,46 +12,51 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Avaliador de decisão para o modo VOTING (votação conservadora por unanimidade).
+ * Implementação de {@link DecisionEvaluator} para o modo {@link DecisionMode#VOTING}.
  *
- * Todas as estratégias devem gerar sinal E concordar na mesma direção
- * para que o sinal final seja emitido.
+ * Aplica votação conservadora por unanimidade: emite sinal final apenas quando
+ * todas as estratégias habilitadas geram sinal não-{@code NONE} e concordam
+ * na mesma direção. Qualquer divergência ou ausência de sinal em qualquer
+ * estratégia resulta em {@link EvaluationResult#noSignal()}.
  *
  * Regras de decisão:
- * - Todas as estratégias devem gerar sinal não-NONE
- * - Todos os sinais devem ser na mesma direção
- * - BUY + BUY → BUY final
- * - SELL + SELL → SELL final
- * - Qualquer divergência → NONE
+ * <ul>
+ *   <li>Todas as estratégias devem gerar sinal não-{@code NONE}</li>
+ *   <li>Todos os sinais devem concordar na mesma direção</li>
+ *   <li>{@code BUY + BUY} → sinal final {@code BUY}</li>
+ *   <li>{@code SELL + SELL} → sinal final {@code SELL}</li>
+ *   <li>Qualquer divergência → {@code NONE}</li>
+ * </ul>
  *
- * Este modo é mais conservador que SINGLE_STRATEGY (exige confirmação de todas)
- * e mais simples que CONFLUENCE (sem pesos ou regime de mercado).
- *
- * Implementa DecisionEvaluator seguindo o padrão Strategy.
+ * Este modo é mais conservador que {@code SINGLE_STRATEGY} (exige confirmação de todas
+ * as estratégias) e mais simples que {@code CONFLUENCE} (sem pesos ou regime de mercado).
  */
 public class VotingEvaluator implements DecisionEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(VotingEvaluator.class);
 
     /**
-     * Avalia sinais de todas as estratégias com regra de unanimidade.
+     * Avalia os sinais de todas as estratégias habilitadas aplicando a regra de unanimidade.
      *
      * Fluxo:
-     * 1. Coleta sinais válidos (não-NONE) de todas as estratégias
-     * 2. Verifica se TODAS geraram sinal (quantidade == strategies.size())
-     * 3. Verifica se TODOS concordam na mesma direção
-     * 4. Retorna EvaluationResult com o sinal de unanimidade ou noSignal()
+     * <ol>
+     *   <li>Coleta sinais válidos (não-{@code NONE}) de todas as estratégias</li>
+     *   <li>Verifica se todas geraram sinal — quantidade deve ser igual a {@code strategies.size()}</li>
+     *   <li>Verifica se todos os sinais concordam na mesma direção</li>
+     *   <li>Retorna {@link EvaluationResult} com o sinal de unanimidade ou {@link EvaluationResult#noSignal()}</li>
+     * </ol>
      *
-     * @param snapshot cópia imutável dos candles
-     * @param strategies lista de estratégias habilitadas (mínimo 2)
-     * @param symbol símbolo do ativo para logs
-     * @return resultado da avaliação por unanimidade
+     * @param snapshot   cópia imutável dos candles disponíveis para avaliação
+     * @param strategies lista de estratégias habilitadas; mínimo de 2 para o modo VOTING
+     * @param symbol     símbolo do ativo, utilizado para os logs de diagnóstico
+     * @return resultado com o sinal de unanimidade ou {@link EvaluationResult#noSignal()} quando
+     *         alguma estratégia não gera sinal ou há divergência de direção
      */
     @Override
     public EvaluationResult evaluate(List<Bar> snapshot, List<TradingStrategy> strategies, String symbol) {
         List<Signal> validSignals = collectValidSignals(snapshot, strategies);
 
-        // Regra 1: TODAS as estratégias devem gerar sinal não-NONE
+        // Todas as estratégias devem gerar sinal — ausência de qualquer uma invalida a votação
         if (validSignals.size() != strategies.size()) {
             log.debug("No unanimous voting signal | symbol={} | validSignals={} enabledStrategies={}",
                     symbol, validSignals.size(), strategies.size());
@@ -60,7 +65,7 @@ public class VotingEvaluator implements DecisionEvaluator {
 
         Signal.Type firstType = validSignals.get(0).getType();
 
-        // Regra 2: Todos os sinais devem concordar na mesma direção
+        // Qualquer divergência de direção invalida a votação
         if (!isUnanimous(validSignals, firstType)) {
             log.debug("Voting conflict | symbol={} | votes={}",
                     symbol,
@@ -81,11 +86,12 @@ public class VotingEvaluator implements DecisionEvaluator {
     }
 
     /**
-     * Coleta sinais válidos (não-NONE) de todas as estratégias habilitadas.
+     * Coleta apenas os sinais válidos (não-{@code NONE}) retornados pelas estratégias.
+     * Sinais nulos são silenciosamente ignorados.
      *
-     * @param snapshot candles para avaliação
-     * @param strategies estratégias a avaliar
-     * @return lista de sinais válidos
+     * @param snapshot   candles disponíveis para avaliação
+     * @param strategies estratégias a serem avaliadas
+     * @return lista de sinais válidos coletados
      */
     private List<Signal> collectValidSignals(List<Bar> snapshot, List<TradingStrategy> strategies) {
         List<Signal> validSignals = new ArrayList<>();
@@ -101,19 +107,20 @@ public class VotingEvaluator implements DecisionEvaluator {
     /**
      * Verifica se todos os sinais da lista concordam com o tipo esperado.
      *
-     * @param signals lista de sinais a verificar
-     * @param expectedType tipo esperado para unanimidade
-     * @return true se todos os sinais são do tipo esperado
+     * @param signals      lista de sinais válidos coletados
+     * @param expectedType tipo esperado para que a votação seja unânime
+     * @return {@code true} se todos os sinais forem do tipo informado
      */
     private boolean isUnanimous(List<Signal> signals, Signal.Type expectedType) {
         return signals.stream().allMatch(s -> s.getType() == expectedType);
     }
 
     /**
-     * Extrai os nomes das estratégias de uma lista de sinais.
+     * Extrai os nomes das estratégias a partir da lista de sinais,
+     * para inclusão na metadata do {@link EvaluationResult}.
      *
      * @param signals lista de sinais com estratégias identificadas
-     * @return lista de nomes de estratégias
+     * @return lista com os nomes das estratégias que votaram
      */
     private List<String> extractStrategyNames(List<Signal> signals) {
         return signals.stream()
@@ -122,12 +129,12 @@ public class VotingEvaluator implements DecisionEvaluator {
     }
 
     /**
-     * Formata a mensagem de log para o sinal final de votação.
+     * Formata a mensagem de log para o sinal final emitido no modo {@code VOTING}.
      *
-     * @param type tipo do sinal
-     * @param symbol símbolo do ativo
-     * @param decisionStrategies estratégias que votaram
-     * @return mensagem formatada para log
+     * @param type               tipo do sinal unânime: {@code BUY} ou {@code SELL}
+     * @param symbol             símbolo do ativo
+     * @param decisionStrategies nomes das estratégias que votaram na direção vencedora
+     * @return mensagem formatada para registro no log operacional
      */
     private String buildLogMessage(Signal.Type type, String symbol, List<String> decisionStrategies) {
         return String.format(

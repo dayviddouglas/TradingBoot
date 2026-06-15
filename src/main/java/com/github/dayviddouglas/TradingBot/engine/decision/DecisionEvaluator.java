@@ -6,39 +6,37 @@ import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
 import java.util.List;
 
 /**
- * Interface que define o contrato para avaliadores de decisão do StrategyEngine.
+ * Contrato para avaliadores de decisão do {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}.
  *
- * Implementa o padrão Strategy: permite trocar a lógica de decisão
- * (SINGLE_STRATEGY, VOTING, CONFLUENCE) sem alterar o StrategyEngine.
- * Cada modo de decisão é uma implementação separada desta interface,
- * respeitando o princípio Open/Closed:
- * - Aberto para extensão: novo modo = nova implementação
- * - Fechado para modificação: StrategyEngine não precisa mudar
+ * Cada implementação encapsula uma estratégia de decisão diferente,
+ * permitindo que o engine troque o comportamento de avaliação sem modificação:
+ * <ul>
+ *   <li>{@code SingleStrategyEvaluator} — modo {@link DecisionMode#SINGLE_STRATEGY}</li>
+ *   <li>{@code VotingEvaluator} — modo {@link DecisionMode#VOTING}</li>
+ *   <li>{@code ConfluenceEvaluator} — modo {@link DecisionMode#CONFLUENCE}</li>
+ * </ul>
+ *
+ * O avaliador é responsável apenas por decidir o sinal a partir das estratégias e candles.
+ * A emissão do sinal final é responsabilidade do
+ * {@link com.github.dayviddouglas.TradingBot.engine.core.SignalEmitter}.
  *
  * Para adicionar um novo modo de decisão:
- * 1. Criar classe que implementa DecisionEvaluator
- * 2. Adicionar o modo no enum DecisionMode
- * 3. Registrar no DecisionEvaluatorFactory
- * 4. Nenhuma alteração no StrategyEngine é necessária
- *
- * Implementações disponíveis:
- * - SingleStrategyEvaluator → DecisionMode.SINGLE_STRATEGY
- * - VotingEvaluator         → DecisionMode.VOTING
- * - ConfluenceEvaluator     → DecisionMode.CONFLUENCE
+ * <ol>
+ *   <li>Criar classe que implementa esta interface</li>
+ *   <li>Adicionar o valor no enum {@link DecisionMode}</li>
+ *   <li>Registrar o novo {@code case} no {@link DecisionEvaluatorFactory}</li>
+ * </ol>
  */
 public interface DecisionEvaluator {
 
     /**
-     * Avalia as estratégias habilitadas e retorna o resultado da decisão.
+     * Avalia as estratégias habilitadas sobre o snapshot de candles e retorna o resultado da decisão.
      *
-     * O avaliador é responsável apenas por decidir o sinal.
-     * O StrategyEngine é responsável por emitir o sinal via callback.
-     * Essa separação respeita o SRP (Single Responsibility Principle).
-     *
-     * @param snapshot cópia imutável dos candles atuais para avaliação
-     * @param strategies lista de estratégias habilitadas para este ativo
-     * @param symbol símbolo do ativo para contexto de logs
-     * @return EvaluationResult contendo o sinal, metadata e mensagem de log
+     * @param snapshot   cópia imutável dos candles atuais para avaliação
+     * @param strategies lista de estratégias habilitadas para o ativo
+     * @param symbol     símbolo do ativo, utilizado para contexto nos logs
+     * @return {@link EvaluationResult} com o tipo do sinal, nome da estratégia,
+     *         metadata e mensagem de log; nunca {@code null}
      */
     EvaluationResult evaluate(List<Bar> snapshot, List<TradingStrategy> strategies, String symbol);
 }

@@ -12,70 +12,62 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Avaliador de decisão para o modo CONFLUENCE (confluência ponderada por regime).
+ * Implementação de {@link DecisionEvaluator} para o modo {@code CONFLUENCE}.
  *
- * O modo mais sofisticado do sistema. Usa:
- * - Classificação de regime de mercado (TRENDING, RANGING, CHOPPY)
- * - Pesos diferenciados por estratégia conforme o regime
- * - Score ponderado (buyScore e sellScore)
- * - Critérios mínimos de score e máximos de oposição
+ * Coordena a avaliação de confluência ponderada delegando toda a lógica de classificação
+ * de regime, cálculo de scores e aplicação das regras ao {@link WeightedConfluenceEvaluator}.
+ * Após receber a {@link ConfluenceDecision}, adapta o resultado para o contrato de
+ * {@link EvaluationResult}, enriquecendo a metadata com regime, scores e votos ponderados.
  *
- * Delega toda a lógica de avaliação para o WeightedConfluenceEvaluator,
- * mantendo o ConfluenceEvaluator focado apenas na adaptação do resultado
- * para o contrato de DecisionEvaluator.
- *
- * Implementa DecisionEvaluator seguindo o padrão Strategy.
- * O construtor aceita injeção do WeightedConfluenceEvaluator para
- * facilitar testes unitários com mocks.
+ * Quando a decisão não atinge os critérios mínimos da {@link ConfluenceRule}
+ * (score insuficiente, conflito ou regime {@code CHOPPY}), retorna
+ * {@link EvaluationResult#noSignal()} sem emitir sinal.
  */
 public class ConfluenceEvaluator implements DecisionEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(ConfluenceEvaluator.class);
 
-    /**
-     * Avaliador de confluência ponderada.
-     * Instanciado com valores padrão ou injetado via construtor parametrizável.
-     */
+    /** Responsável pela classificação de regime, cálculo de scores e resolução do sinal final. */
     private final WeightedConfluenceEvaluator weightedConfluenceEvaluator;
 
     /**
-     * Construtor padrão com WeightedConfluenceEvaluator de valores padrão.
-     * Usado pela DecisionEvaluatorFactory em produção.
+     * Construtor padrão com {@link WeightedConfluenceEvaluator} configurado com valores padrão.
+     * Utilizado pelo {@code DecisionEvaluatorFactory} em produção.
      */
     public ConfluenceEvaluator() {
         this(new WeightedConfluenceEvaluator());
     }
 
     /**
-     * Construtor parametrizável para injeção de dependência e testes.
+     * Construtor parametrizável para injeção de dependência e testes unitários.
      *
-     * @param evaluator instância de WeightedConfluenceEvaluator a usar
+     * @param evaluator instância de {@link WeightedConfluenceEvaluator} a ser utilizada
      */
     public ConfluenceEvaluator(WeightedConfluenceEvaluator evaluator) {
         this.weightedConfluenceEvaluator = evaluator;
     }
 
     /**
-     * Avalia sinais usando confluência ponderada com regime de mercado.
+     * Avalia os sinais das estratégias usando confluência ponderada com regime de mercado.
      *
-     * Fluxo:
-     * 1. Delega para WeightedConfluenceEvaluator
-     * 2. Verifica se a decisão é válida (score suficiente, regime não-CHOPPY)
-     * 3. Retorna EvaluationResult com metadata enriquecida de regime e scores
+     * Fluxo de avaliação:
+     * <ol>
+     *   <li>Delega para {@link WeightedConfluenceEvaluator#evaluate} para classificar o regime,
+     *       calcular os scores e resolver o tipo do sinal</li>
+     *   <li>Verifica se a decisão é válida via {@link ConfluenceDecision#isValid()}</li>
+     *   <li>Constrói o {@link EvaluationResult} com metadata enriquecida para rastreabilidade</li>
+     * </ol>
      *
-     * A metadata do resultado inclui regime, buyScore, sellScore e votos ponderados
-     * para rastreabilidade e auditoria operacional.
-     *
-     * @param snapshot cópia imutável dos candles
-     * @param strategies lista de estratégias habilitadas (mínimo 2)
-     * @param symbol símbolo do ativo para logs
-     * @return resultado da avaliação de confluência
+     * @param snapshot   cópia imutável dos candles disponíveis para avaliação
+     * @param strategies lista de estratégias habilitadas; mínimo de 2 para o modo CONFLUENCE
+     * @param symbol     símbolo do ativo, utilizado apenas para os logs de diagnóstico
+     * @return resultado da avaliação com tipo do sinal e metadata enriquecida,
+     *         ou {@link EvaluationResult#noSignal()} quando os critérios não são atingidos
      */
     @Override
     public EvaluationResult evaluate(List<Bar> snapshot, List<TradingStrategy> strategies, String symbol) {
         ConfluenceDecision decision = weightedConfluenceEvaluator.evaluate(snapshot, strategies);
 
-        // Decisão inválida: score insuficiente, conflito ou regime CHOPPY
         if (!decision.isValid()) {
             log.debug("No weighted confluence | symbol={} | regime={} | buyScore={} | sellScore={}",
                     symbol, decision.regime(), decision.buyScore(), decision.sellScore());
@@ -84,7 +76,6 @@ public class ConfluenceEvaluator implements DecisionEvaluator {
 
         Signal.Type finalType = decision.finalType();
 
-        // Metadata enriquecida para rastreabilidade e análise por regime
         Map<String, Object> metadata = buildConfluenceMetadata(decision);
 
         String logMessage = buildLogMessage(finalType, symbol, decision);
@@ -93,33 +84,30 @@ public class ConfluenceEvaluator implements DecisionEvaluator {
     }
 
     /**
-     * Constrói a metadata enriquecida específica do modo CONFLUENCE.
+     * Constrói o mapa de metadata enriquecida com os dados específicos do modo {@code CONFLUENCE}.
+     * Inclui regime, scores e representação textual dos votos ponderados para auditoria operacional
+     * e análise de performance por regime.
      *
-     * Inclui regime, scores e votos ponderados para:
-     * - Auditoria operacional
-     * - Análise de performance por regime
-     * - Debug de decisões questionáveis
-     *
-     * @param decision decisão completa da confluência
-     * @return mapa de metadata para o Signal final
+     * @param decision decisão completa retornada pelo {@link WeightedConfluenceEvaluator}
+     * @return mapa imutável de metadata para compor o {@code Signal} final
      */
     private Map<String, Object> buildConfluenceMetadata(ConfluenceDecision decision) {
         return Map.of(
                 "decisionStrategies", decision.decisionStrategies(),
-                "regime", decision.regime().name(),
-                "buyScore", decision.buyScore(),
-                "sellScore", decision.sellScore(),
-                "weightedVotes", decision.weightedVotes().toString()
+                "regime",             decision.regime().name(),
+                "buyScore",           decision.buyScore(),
+                "sellScore",          decision.sellScore(),
+                "weightedVotes",      decision.weightedVotes().toString()
         );
     }
 
     /**
-     * Formata a mensagem de log para o sinal final de confluência.
+     * Formata a mensagem de log estruturada para o sinal final emitido no modo {@code CONFLUENCE}.
      *
-     * @param type tipo do sinal
-     * @param symbol símbolo do ativo
-     * @param decision decisão de confluência com scores e regime
-     * @return mensagem formatada para log
+     * @param type     tipo do sinal final: {@code BUY} ou {@code SELL}
+     * @param symbol   símbolo do ativo
+     * @param decision decisão com regime, scores e estratégias decisoras
+     * @return mensagem formatada para registro no log operacional
      */
     private String buildLogMessage(Signal.Type type, String symbol, ConfluenceDecision decision) {
         return String.format(

@@ -8,37 +8,23 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Memória compartilhada de regimes confirmados por símbolo.
+ * Armazena e fornece acesso em O(1) ao regime de mercado confirmado por ativo.
  *
- * Responsabilidade única: armazenar e fornecer acesso O(1) ao regime
- * atual confirmado de cada ativo, para consulta durante a execução de trades.
+ * Apenas regimes que passaram pelo filtro de persistência do {@link RegimeStateTracker}
+ * (3 avaliações consecutivas = 45 minutos de confirmação) são registrados aqui.
+ * Regimes candidatos ou provisórios nunca são armazenados neste registry.
  *
- * O "confirmado" é a palavra-chave: este registry nunca armazena um
- * regime candidato ou provisório. Apenas regimes que passaram pelo
- * filtro de persistência do RegimeStateTracker (3 avaliações consecutivas)
- * são registrados aqui.
+ * Desacopla o pipeline de classificação ({@link MarketRegimeMonitor} →
+ * {@link RegimeStateTracker}) do pipeline de execução
+ * ({@link com.github.dayviddouglas.TradingBot.deriv.DerivTradeService}):
+ * o {@code DerivTradeService} não precisa conhecer o histórico de classificações,
+ * consultando apenas o estado atual confirmado via {@link #getRegime}.
  *
- * Contexto arquitetural:
- * O registry existe para desacoplar o pipeline de classificação de regime
- * (MarketRegimeMonitor → RegimeStateTracker) do pipeline de execução
- * (DerivTradeService). O DerivTradeService não precisa conhecer o histórico
- * de classificações; ele apenas consulta o estado atual confirmado.
- *
- * Fundamentação científica:
- * A separação entre "regime detectado" e "regime confirmado" implementa
- * o conceito de smoothing de Hamilton [1989]: apenas transições persistentes
- * são tratadas como mudanças estruturais reais. Isso reduz a frequência
- * com que o sistema muda de comportamento em resposta a flutuações de curto prazo.
- *
- * Thread-safety:
- * ConcurrentHashMap garante operações atômicas sem sincronização explícita.
- * O padrão de acesso é: escritas pelo RegimeStateTracker (em virtual thread
- * do StrategyEngine) e leituras pelo DerivTradeService (em virtual thread
- * de execução). ConcurrentHashMap é suficiente para este padrão.
- *
- * A anotação @Component registra esta classe como bean singleton no
- * container IoC do Spring, garantindo que todos os componentes que
- * dependem dele recebam a mesma instância (estado compartilhado).
+ * O padrão de acesso é escritas pelo {@link RegimeStateTracker} em virtual thread do
+ * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine} e leituras
+ * pelo {@code DerivTradeService} em virtual thread de execução de trade.
+ * {@link ConcurrentHashMap} é suficiente para esse padrão, pois não há operações
+ * compostas que necessitem de lock explícito.
  */
 @Component
 public class RegimeRegistry {
@@ -46,38 +32,27 @@ public class RegimeRegistry {
     private static final Logger log = LoggerFactory.getLogger(RegimeRegistry.class);
 
     /**
-     * Regime padrão retornado quando nenhuma classificação foi confirmada ainda.
-     *
-     * CHOPPY é o valor padrão conservador: na ausência de informação sobre
-     * o regime, o sistema assume o pior caso (mercado sem estrutura definida),
-     * o que evita que o DerivTradeService tome decisões com base em regime
-     * desconhecido.
+     * Regime padrão retornado quando nenhuma classificação foi confirmada para o ativo.
+     * {@code CHOPPY} é o valor conservador: na ausência de informação sobre o regime,
+     * o sistema assume o pior caso para evitar decisões baseadas em regime desconhecido.
      */
     private static final MarketRegime DEFAULT_REGIME = MarketRegime.CHOPPY;
 
     /**
      * Mapa de regime confirmado por símbolo.
-     *
-     * Chave: símbolo do ativo (ex: "frxEURUSD")
-     * Valor: último regime confirmado pelo RegimeStateTracker
-     *
-     * ConcurrentHashMap é usado em vez de HashMap + synchronized porque:
-     * - As operações get() e put() são atômicas individualmente
-     * - Não há operações compostas (check-then-act) que precisem de lock
-     * - Oferece melhor throughput em cenário multi-ativo simultâneo
+     * Chave: símbolo do ativo (ex: {@code "frxEURUSD"}).
+     * Valor: último regime confirmado pelo {@link RegimeStateTracker}.
      */
     private final Map<String, MarketRegime> confirmedRegimeBySymbol =
             new ConcurrentHashMap<>();
 
     /**
-     * Atualiza o regime confirmado de um símbolo.
-     *
-     * Chamado pelo RegimeStateTracker quando o filtro de persistência
-     * confirma uma transição de regime. Não deve ser chamado com regimes
-     * candidatos (não confirmados).
+     * Atualiza o regime confirmado de um ativo e registra a transição em log operacional.
+     * Chamado pelo {@link RegimeStateTracker} após confirmação pelo filtro de persistência.
+     * Não deve ser chamado com regimes candidatos não confirmados.
      *
      * @param symbol símbolo do ativo
-     * @param regime novo regime confirmado
+     * @param regime novo regime confirmado a ser registrado
      */
     public void updateRegime(String symbol, MarketRegime regime) {
         MarketRegime previous = confirmedRegimeBySymbol.put(symbol, regime);
@@ -92,59 +67,50 @@ public class RegimeRegistry {
     }
 
     /**
-     * Retorna o regime confirmado atual de um símbolo.
-     *
-     * Acesso O(1) via ConcurrentHashMap, adequado para uso no caminho
-     * crítico do DerivTradeService durante a execução de trades.
+     * Retorna o regime confirmado atual para o ativo informado.
+     * Retorna {@link MarketRegime#CHOPPY} quando nenhuma classificação foi confirmada ainda.
      *
      * @param symbol símbolo do ativo
-     * @return regime confirmado atual ou CHOPPY se nenhum ainda confirmado
+     * @return regime confirmado atual ou {@link #DEFAULT_REGIME} se não houver classificação
      */
     public MarketRegime getRegime(String symbol) {
         return confirmedRegimeBySymbol.getOrDefault(symbol, DEFAULT_REGIME);
     }
 
     /**
-     * Verifica se existe regime confirmado para o símbolo.
-     *
-     * Útil para distinguir entre "regime CHOPPY confirmado" e
-     * "nenhuma classificação confirmada ainda" durante o período
-     * de warm-up do sistema (primeiros candles após inicialização).
+     * Verifica se já existe regime confirmado para o ativo.
+     * Permite distinguir entre "regime {@code CHOPPY} confirmado" e
+     * "nenhuma classificação confirmada ainda" durante o período de warm-up.
      *
      * @param symbol símbolo do ativo
-     * @return true se pelo menos uma classificação foi confirmada
+     * @return {@code true} se pelo menos uma classificação foi confirmada para o ativo
      */
     public boolean hasConfirmedRegime(String symbol) {
         return confirmedRegimeBySymbol.containsKey(symbol);
     }
 
     /**
-     * Remove o regime de um símbolo (usado em testes ou reset de estado).
+     * Remove o regime confirmado de um ativo do registry.
+     * Utilizado em testes ou cenários de reset de estado.
      *
-     * @param symbol símbolo a remover
+     * @param symbol símbolo do ativo a ser removido
      */
     public void clearRegime(String symbol) {
         confirmedRegimeBySymbol.remove(symbol);
     }
 
-
     /**
-     * Atualiza o regime confirmado de um símbolo sem gerar log.
+     * Atualiza o regime confirmado de um ativo sem gerar log de transição.
+     * Utilizado exclusivamente pelo {@link MarketRegimeMonitor} durante o warm-up histórico
+     * para suprimir logs de transições intermediárias que não representam eventos reais de mercado.
+     * O regime final confirmado ao término do warm-up é logado pelo
+     * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}.
      *
-     * Usado exclusivamente durante o warm-up histórico pelo
-     * MarketRegimeMonitor.onRegimeConfirmedWarmUp() para suprimir
-     * logs de transições intermediárias do histórico que não
-     * representam eventos reais de mercado.
-     *
-     * O regime final confirmado ao término do warm-up é logado
-     * pelo StrategyEngine.evaluateRegimeFromHistory().
-     *
-     * ⚠️ Não usar no fluxo de runtime — usar updateRegime() que
-     * mantém rastreabilidade operacional completa nos logs.
+     * No fluxo de runtime, utilizar {@link #updateRegime} para manter rastreabilidade
+     * operacional completa nos logs.
      *
      * @param symbol símbolo do ativo
-     * @param regime novo regime confirmado silenciosamente
-     * @since v5.4.2
+     * @param regime novo regime confirmado a ser registrado silenciosamente
      */
     public void updateRegimeSilently(String symbol, MarketRegime regime) {
         confirmedRegimeBySymbol.put(symbol, regime);

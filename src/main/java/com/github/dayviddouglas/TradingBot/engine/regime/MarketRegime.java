@@ -1,116 +1,82 @@
 package com.github.dayviddouglas.TradingBot.engine.regime;
 
 /**
- * Enum que classifica o regime (contexto) atual do mercado.
+ * Classifica o regime (contexto operacional) atual do mercado.
  *
- * O regime é determinado pelo MarketRegimeClassifier com base em heurísticas
- * que analisam:
- * - ATR curto vs ATR base (intensidade do movimento)
- * - Distância entre EMAs (presença de direção)
- * - Eficiência do movimento (linearidade vs ziguezague)
+ * O regime é determinado pelo {@link MarketRegimeClassifier} com base em três heurísticas:
+ * intensidade do movimento via ATR curto versus ATR base, presença de direção via distância
+ * entre EMAs e linearidade do movimento via Efficiency Ratio.
  *
- * O regime influencia o comportamento do sistema de duas formas:
+ * O regime influencia o sistema de duas formas distintas conforme o modo de decisão:
+ * <ul>
+ *   <li>No modo {@code CONFLUENCE}: os pesos das estratégias variam conforme o regime.
+ *       Estratégias de reversão são favorecidas em {@code RANGING}; estratégias de breakout
+ *       são favorecidas em {@code TRENDING}. Em {@code CHOPPY}, a avaliação é bloqueada.</li>
+ *   <li>No modo {@code VOTING}: o regime não influencia a decisão. As estratégias votam
+ *       independentemente do contexto de mercado.</li>
+ * </ul>
  *
- * 1. No modo CONFLUENCE: os pesos das estratégias mudam conforme o regime.
- *    Estratégias de reversão ganham peso em RANGING; estratégias de breakout
- *    ganham peso em TRENDING. Em CHOPPY, a confluência é bloqueada.
- *
- * 2. No modo VOTING: o regime NÃO influencia a decisão. As estratégias
- *    votam independentemente do contexto de mercado.
- *
- * ⚠️ Ponto de atenção: O regime não é um sinal de compra ou venda.
- * Ele é apenas uma tentativa de classificar o ambiente operacional
- * para ajustar o comportamento do sistema conforme o contexto.
- *
- * Limitação conhecida: A classificação é baseada em heurísticas simples
- * e pode gerar falsos positivos (ex: classificar um spike momentâneo
- * como TRENDING). Considere isso ao interpretar decisões baseadas em regime.
+ * O regime não é um sinal de compra ou venda — é uma estimativa do ambiente operacional
+ * para ajustar o comportamento do sistema. A classificação é baseada em heurísticas
+ * e pode gerar falsos positivos, como classificar um spike momentâneo como {@code TRENDING}.
  *
  * Alinhamento conceitual entre estratégias e regimes:
- * ┌───────────────────────────┬─────────┬─────────┬─────────┐
- * │ Estratégia                │TRENDING │ RANGING │ CHOPPY  │
- * ├───────────────────────────┼─────────┼─────────┼─────────┤
- * │ BollingerMeanReversion    │  fraco  │  forte  │  ruim   │
- * │ ZScoreMeanReversion       │  fraco  │  forte  │  ruim   │
- * │ Breakout                  │  forte  │  fraco  │  ruim   │
- * │ DonchianBreakout          │  forte  │  fraco  │  ruim   │
- * │ KeltnerChannel            │  forte  │  fraco  │  ruim   │
- * │ EmaRsi                    │  forte  │  fraco  │  ruim   │
- * │ PinBar                    │  médio  │  forte  │  ruim   │
- * │ SupportResistance         │  fraco  │  forte  │  ruim   │
- * └───────────────────────────┴─────────┴─────────┴─────────┘
+ * <pre>
+ * ┌───────────────────────────┬──────────┬──────────┬─────────┐
+ * │ Estratégia                │ TRENDING │ RANGING  │ CHOPPY  │
+ * ├───────────────────────────┼──────────┼──────────┼─────────┤
+ * │ BollingerMeanReversion    │  fraco   │  forte   │  ruim   │
+ * │ ZScoreMeanReversion       │  fraco   │  forte   │  ruim   │
+ * │ Breakout                  │  forte   │  fraco   │  ruim   │
+ * │ DonchianBreakout          │  forte   │  fraco   │  ruim   │
+ * │ KeltnerChannel            │  forte   │  fraco   │  ruim   │
+ * │ EmaRsi                    │  forte   │  fraco   │  ruim   │
+ * │ PinBar                    │  médio   │  forte   │  ruim   │
+ * │ SupportResistance         │  fraco   │  forte   │  ruim   │
+ * └───────────────────────────┴──────────┴──────────┴─────────┘
+ * </pre>
  */
 public enum MarketRegime {
 
     /**
      * Mercado com direção relativamente clara.
      *
-     * Características:
-     * - Preço andando de forma mais linear (eficiência alta)
-     * - EMAs bem separadas (indicando momentum direcional)
-     * - ATR consistente com a tendência
+     * Identificado por eficiência de movimento elevada, EMAs bem separadas
+     * indicando momentum direcional e ATR consistente com a tendência.
      *
-     * Estratégias mais adequadas:
-     * - Breakout
-     * - DonchianBreakout
-     * - KeltnerChannel
-     * - EmaRsi
+     * Estratégias mais adequadas: {@code Breakout}, {@code DonchianBreakout},
+     * {@code KeltnerChannel}, {@code EmaRsi}.
      *
-     * Estratégias menos adequadas:
-     * - BollingerMeanReversion
-     * - ZScoreMeanReversion
-     * - SupportResistance
-     *
-     * Analogia simples: uma estrada reta onde o preço anda para frente.
+     * Estratégias menos adequadas: {@code BollingerMeanReversion},
+     * {@code ZScoreMeanReversion}, {@code SupportResistance}.
      */
     TRENDING,
 
     /**
-     * Mercado lateral / reversivo.
+     * Mercado lateral com comportamento reversivo.
      *
-     * Características:
-     * - Preço oscilando dentro de uma faixa (eficiência baixa)
-     * - EMAs próximas ou cruzando frequentemente
-     * - ATR dentro da normalidade histórica
+     * Identificado por eficiência de movimento baixa, EMAs próximas ou cruzando
+     * frequentemente e ATR dentro da normalidade histórica.
      *
-     * Estratégias mais adequadas:
-     * - BollingerMeanReversion
-     * - ZScoreMeanReversion
-     * - PinBar
-     * - SupportResistance
+     * Estratégias mais adequadas: {@code BollingerMeanReversion},
+     * {@code ZScoreMeanReversion}, {@code PinBar}, {@code SupportResistance}.
      *
-     * Estratégias menos adequadas:
-     * - Breakout (gera muitos falsos rompimentos)
-     * - DonchianBreakout
-     * - EmaRsi (cruzamentos de EMA geram ruído)
-     *
-     * Analogia simples: uma praça onde o preço fica andando de um lado para o outro.
-     *
-     * Este é o regime onde as estratégias atuais do projeto (Bollinger + ZScore)
-     * tendem a apresentar melhor desempenho, conforme evidenciado nos backtests.
+     * Estratégias menos adequadas: {@code Breakout} (gera falsos rompimentos),
+     * {@code DonchianBreakout}, {@code EmaRsi} (cruzamentos geram ruído).
      */
     RANGING,
 
     /**
-     * Mercado ruim / confuso / ruidoso.
+     * Mercado ruidoso sem padrão definido.
      *
-     * Características:
-     * - Preço se movendo de forma errática sem padrão
-     * - Nem tendência clara nem faixa definida
-     * - Muito ruído e pouca previsibilidade
+     * Identificado por movimento errático sem tendência clara nem faixa definida,
+     * com alto nível de ruído e baixa previsibilidade.
      *
-     * Comportamento do sistema:
-     * - No modo CONFLUENCE: a avaliação é bloqueada (nenhum sinal é emitido)
-     * - No modo VOTING: o regime não influencia (pode operar normalmente)
+     * No modo {@code CONFLUENCE}, a avaliação é bloqueada e nenhum sinal é emitido.
+     * No modo {@code VOTING}, o regime não influencia a decisão — sinais podem ser
+     * gerados, mas a qualidade tende a ser inferior neste contexto.
      *
-     * Nenhuma família de estratégia costuma ter edge consistente neste regime.
-     * Operar em CHOPPY geralmente degrada a expectância do sistema.
-     *
-     * ⚠️ Ponto de atenção: O modo VOTING não filtra por regime, então
-     * pode gerar sinais em CHOPPY. Isso é intencional mas pode ser
-     * uma fonte de trades de baixa qualidade.
-     *
-     * Analogia simples: uma rua esburacada onde o preço pula e muda de direção o tempo todo.
+     * Nenhuma família de estratégia costuma apresentar edge consistente neste regime.
      */
     CHOPPY
 }

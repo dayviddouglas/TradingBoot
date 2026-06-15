@@ -3,60 +3,51 @@ package com.github.dayviddouglas.TradingBot.engine.regime;
 import java.time.Instant;
 
 /**
- * Snapshot imutável das métricas técnicas que fundamentaram uma
- * classificação de regime.
+ * Snapshot imutável das métricas técnicas que fundamentaram uma classificação de regime.
  *
- * Este record serve como "prova de trabalho" da decisão de regime:
- * em vez de apenas saber que o regime é RANGING, é possível auditar
- * exatamente quais valores de ATR, EMA e Efficiency Ratio levaram
- * àquela classificação.
+ * Serve como "prova de trabalho" da decisão: em vez de apenas registrar o regime resultante,
+ * permite auditar exatamente quais valores de ATR, EMA e Efficiency Ratio levaram àquela
+ * classificação. Utilizado pelo {@link RegimeChangeEvent} para registrar o estado no momento
+ * da transição confirmada.
  *
- * Atualização v5.4.2:
- * Campo marketTimestamp adicionado para registrar o timestamp do
- * último candle da janela de classificação. Esse campo representa
- * o momento REAL de mercado em que o regime foi detectado, em vez
- * do Instant.now() do processamento que gerava timestamps artificiais
- * durante o warm-up histórico.
+ * O campo {@code marketTimestamp} representa o timestamp do último candle da janela de
+ * classificação, ou seja, o momento real de mercado em que o regime foi detectado.
+ * Esse campo é essencial para garantir que os relatórios de regime utilizem o tempo
+ * de mercado em vez do tempo de processamento, especialmente durante o warm-up histórico.
  *
- * Contexto científico:
- * Os campos refletem os três pilares da classificação de regime
- * definidos em [Andersen & Bollerslev, 1997]:
- * - atrRatio: intensidade da volatilidade relativa ao baseline
- * - emaDistance: presença ou ausência de direção direcional
- * - efficiency: linearidade do movimento (Kaufman Efficiency Ratio)
+ * Utilizado por:
+ * <ul>
+ *   <li>{@link RegimeChangeEvent} — snapshot das métricas no momento da transição confirmada</li>
+ *   <li>{@link RegimeStateTracker} — avaliação de persistência do regime candidato</li>
+ *   <li>{@link MarketRegimeMonitor} — log de diagnóstico a cada classificação</li>
+ * </ul>
  *
- * Usado por:
- * - RegimeChangeEvent: snapshot no momento da transição
- * - RegimeStateTracker: avaliação de persistência de candidato
- * - MarketRegimeMonitor: log de diagnóstico a cada classificação
- *
- * @param atrFast          ATR de curto prazo
- * @param atrBase          ATR de referência/baseline
- * @param atrRatio         razão atrFast / atrBase
- * @param emaDistance      distância absoluta entre EMA rápida e lenta
- * @param efficiency       Efficiency Ratio do movimento
- * @param regime           regime classificado com base nessas métricas
- * @param marketTimestamp  timestamp do último candle da janela de
- *                         classificação — representa o momento real
- *                         de mercado da detecção do regime (v5.4.2)
+ * @param atrFast         ATR de curto prazo calculado sobre a janela recente
+ * @param atrBase         ATR de referência calculado sobre a janela histórica mais longa
+ * @param atrRatio        razão {@code atrFast / atrBase}; mede a intensidade relativa da volatilidade
+ * @param emaDistance     distância absoluta entre EMA rápida e lenta; indica presença de momentum
+ * @param efficiency      Efficiency Ratio do movimento; mede a linearidade do preço
+ * @param regime          regime classificado com base nos valores acima
+ * @param marketTimestamp timestamp do último candle da janela analisada; representa o momento
+ *                        real de mercado da detecção
  */
 public record RegimeMetrics(
-        double      atrFast,
-        double      atrBase,
-        double      atrRatio,
-        double      emaDistance,
-        double      efficiency,
+        double       atrFast,
+        double       atrBase,
+        double       atrRatio,
+        double       emaDistance,
+        double       efficiency,
         MarketRegime regime,
-        Instant     marketTimestamp
+        Instant      marketTimestamp
 ) {
 
     /**
      * Verifica se todas as métricas são válidas para análise.
+     * Métricas inválidas ocorrem quando o histórico disponível é menor que o período
+     * requerido pelos indicadores, resultando em valores {@code NaN} ou {@code Infinity}.
      *
-     * Métricas inválidas ocorrem quando há dados insuficientes para
-     * calcular os indicadores (histórico menor que o período requerido).
-     *
-     * @return true se todos os valores são finitos e o baseline é positivo
+     * @return {@code true} se todos os campos numéricos são finitos, {@code atrBase} é positivo
+     *         e {@code marketTimestamp} não é nulo
      */
     public boolean isValid() {
         return Double.isFinite(atrFast)
@@ -69,9 +60,9 @@ public record RegimeMetrics(
     }
 
     /**
-     * Retorna descrição compacta para logs operacionais.
+     * Formata todas as métricas em string compacta para uso nos logs operacionais.
      *
-     * @return string formatada com todas as métricas
+     * @return string com todos os campos formatados, incluindo o timestamp de mercado
      */
     public String toLogString() {
         return String.format(

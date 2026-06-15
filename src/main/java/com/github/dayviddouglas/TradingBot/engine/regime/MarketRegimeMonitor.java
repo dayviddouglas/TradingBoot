@@ -10,58 +10,38 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Orquestrador do pipeline de monitoramento de regime de mercado.
+ * Orquestrador do pipeline de monitoramento contínuo de regime de mercado.
  *
- * Responsabilidade única: receber eventos onBar do StrategyEngine,
- * aplicar decimação temporal e acionar a classificação de regime
- * na janela correta de candles.
+ * Recebe eventos {@link #onBar} do {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine},
+ * aplica decimação temporal e aciona a classificação de regime na janela correta de candles.
  *
- * Fundamentação científica — três parâmetros críticos:
+ * <b>Fundamentação científica dos três parâmetros críticos:</b>
+ * <ul>
+ *   <li><b>Decimação ({@value DECIMATION_INTERVAL} candles)</b>: implementa a filtragem de ruído
+ *       de microestrutura intraday de Hansen {@literal &} Lunde (2006). Em candles de 1 minuto,
+ *       avalia o regime a cada 15 minutos, capturando mudanças estruturais sem reagir a ruído
+ *       de curto prazo.</li>
+ *   <li><b>Janela de observação ({@value REGIME_LOOKBACK} candles)</b>: calibrado para capturar
+ *       a duração modal dos regimes estruturais conforme Bulla {@literal &} Bulla (2006).
+ *       Em candles de 1 minuto, 200 candles ≈ 3h20min de histórico.</li>
+ *   <li><b>Filtro de persistência (no {@link RegimeStateTracker})</b>: implementação do teste
+ *       de Hamilton (1989) com 3 confirmações consecutivas, reduzindo a probabilidade de
+ *       falso positivo a ≈ 0.001.</li>
+ * </ul>
  *
- * 1. Decimação (DECIMATION_INTERVAL = 15 candles):
- *    Baseado em [Hansen & Lunde, 2006] para filtragem de ruído de
- *    microestrutura intraday. Avaliar regime a cada tick seria dominado
- *    por ruído; avaliar a cada 15 minutos captura mudanças estruturais
- *    sem ser excessivamente reativo a movimentos de curto prazo.
- *    Referência: Hansen, P.R. & Lunde, A. (2006). "Realized Variance
- *    and Market Microstructure Noise." Journal of Business & Economic
- *    Statistics, 24(2), 127-161.
+ * Disponibiliza dois pipelines distintos:
+ * <ul>
+ *   <li><b>Runtime</b> via {@link #onBar}: aplica decimação, classifica o regime, aciona
+ *       o filtro de persistência e, quando confirmado, atualiza o {@link RegimeRegistry}
+ *       e persiste o evento no {@link RegimeHistoryService}</li>
+ *   <li><b>Warm-up histórico</b> via {@link #evaluateForWarmUp}: mesmo pipeline de decimação
+ *       e classificação, mas atualiza o {@link RegimeRegistry} silenciosamente sem gravar
+ *       no {@link RegimeHistoryService} nem gerar logs de transição intermediária</li>
+ * </ul>
  *
- * 2. Janela de observação (REGIME_LOOKBACK = 200 candles):
- *    Calibrado para capturar a duração modal dos regimes estruturais
- *    conforme [Bulla & Bulla, 2006]. Com candles de 1 minuto, 200 candles
- *    representam ~3.3 horas, período suficiente para capturar tanto
- *    sessões de range curto quanto tendências de meia-sessão.
- *    Referência: Bulla, J. & Bulla, I. (2006). "Stylized Facts of
- *    Financial Time Series and Hidden Semi-Markov Models." Computational
- *    Statistics & Data Analysis, 51(4), 2192-2209.
- *
- * 3. Filtro de persistência (no RegimeStateTracker):
- *    Implementação do teste de Hamilton [1989] com 3 confirmações,
- *    reduzindo α (probabilidade de falso positivo) a ≈ 0.001.
- *
- * Fluxo por candle (runtime):
- * 1. onBar() recebe cada candle do StrategyEngine
- * 2. Incrementa contador de decimação por símbolo
- * 3. Se contador < DECIMATION_INTERVAL: retorna sem avaliar
- * 4. Se contador == DECIMATION_INTERVAL: avalia e reseta contador
- * 5. Extrai janela de REGIME_LOOKBACK candles do snapshot
- * 6. Classifica regime via MarketRegimeClassifier (retorna RegimeMetrics)
- * 7. Passa para RegimeStateTracker aplicar filtro de persistência
- * 8. Se transição confirmada: atualiza RegimeRegistry + notifica RegimeHistoryService
- *
- * Fluxo de warm-up histórico (v5.4.2):
- * 1. evaluateForWarmUp() recebe snapshot parcial do histórico
- * 2. Aplica mesma decimação do runtime (compartilha contadores)
- * 3. Classifica regime com pipeline idêntico ao runtime
- * 4. Se transição confirmada: atualiza RegimeRegistry silenciosamente
- * 5. NÃO grava no RegimeHistoryService (dados históricos, não tempo real)
- * 6. NÃO gera logs de transições intermediárias do histórico
- *
- * Thread-safety:
- * ConcurrentHashMap para o mapa de contadores por símbolo. Cada símbolo
- * tem sua própria thread do StrategyEngine (via virtual thread), portanto
- * o contador de cada símbolo é acessado por uma única thread por vez.
+ * Os contadores de decimação são compartilhados entre warm-up e runtime via
+ * {@code decimationCounterBySymbol}, garantindo continuidade exata dos ciclos de decimação
+ * entre as duas fases sem reinicialização ao término do warm-up.
  */
 @Component
 public class MarketRegimeMonitor {
@@ -70,20 +50,16 @@ public class MarketRegimeMonitor {
             LoggerFactory.getLogger(MarketRegimeMonitor.class);
 
     /**
-     * Frequência de avaliação: a cada N candles fechados.
-     *
-     * Valor 15 implementa a decimação de Hansen & Lunde [2006]:
-     * com candles de 1 minuto, avalia o regime a cada 15 minutos,
-     * filtrando o ruído de microestrutura intraday.
+     * Frequência de avaliação: uma avaliação a cada {@value DECIMATION_INTERVAL} candles fechados.
+     * Em candles de 1 minuto, avalia o regime a cada 15 minutos.
+     * Implementa a decimação temporal de Hansen {@literal &} Lunde (2006).
      */
     private static final int DECIMATION_INTERVAL = 15;
 
     /**
-     * Janela de candles usada pelo classificador de regime.
-     *
-     * Valor 200 baseado em Bulla & Bulla [2006] para capturar
-     * a duração modal dos regimes estruturais em séries financeiras.
-     * Com candles de 1 minuto: 200 candles ≈ 3h20min de histórico.
+     * Tamanho da janela de candles fornecida ao {@link MarketRegimeClassifier}.
+     * Valor baseado em Bulla {@literal &} Bulla (2006) para capturar a duração modal
+     * dos regimes estruturais. Em candles de 1 minuto: 200 candles ≈ 3h20min.
      */
     private static final int REGIME_LOOKBACK = 200;
 
@@ -93,23 +69,19 @@ public class MarketRegimeMonitor {
     private final RegimeHistoryService   regimeHistoryService;
 
     /**
-     * Contadores de decimação por símbolo.
-     *
-     * Compartilhados entre o warm-up e o runtime para garantir
-     * continuidade exata dos ciclos de decimação entre as duas fases.
-     * Ao término do warm-up, o contador de cada símbolo estará no
-     * valor correto para continuação imediata com os ticks reais.
+     * Contadores de decimação por símbolo, compartilhados entre warm-up e runtime.
+     * Cada símbolo tem seu contador incrementado independentemente, pois cada ativo
+     * possui sua própria thread de processamento via virtual thread do
+     * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}.
      */
     private final Map<String, Integer> decimationCounterBySymbol =
             new ConcurrentHashMap<>();
 
     /**
-     * Construtor com injeção de dependências via construtor (DIP).
-     *
-     * @param regimeClassifier     classifica o regime com base nos candles
-     * @param stateTracker         aplica filtro de persistência por símbolo
-     * @param regimeRegistry       armazena regime confirmado para consulta O(1)
-     * @param regimeHistoryService persiste eventos de transição em arquivo JSON
+     * @param regimeClassifier     classifica o regime com base na janela de candles
+     * @param stateTracker         aplica o filtro de persistência de Hamilton (1989) por símbolo
+     * @param regimeRegistry       armazena o regime confirmado para consulta em O(1)
+     * @param regimeHistoryService persiste eventos de transição no arquivo JSON diário
      */
     public MarketRegimeMonitor(
             MarketRegimeClassifier regimeClassifier,
@@ -128,17 +100,14 @@ public class MarketRegimeMonitor {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Processa um novo candle fechado e aciona a avaliação de regime
-     * quando necessário.
+     * Processa um novo candle fechado e aciona a avaliação de regime quando necessário.
+     * Invocado pelo {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}
+     * a cada candle aceito em tempo real.
      *
-     * Ponto de entrada chamado pelo StrategyEngine a cada candle aceito
-     * em tempo real. A avaliação efetiva ocorre apenas a cada
-     * DECIMATION_INTERVAL candles, implementando a decimação temporal
-     * de Hansen & Lunde [2006].
-     *
-     * Quando a transição é confirmada:
-     * - RegimeRegistry é atualizado com log operacional
-     * - RegimeHistoryService grava o evento no JSON diário
+     * A avaliação efetiva ocorre apenas a cada {@value DECIMATION_INTERVAL} candles,
+     * implementando a decimação temporal. Quando uma transição é confirmada pelo
+     * {@link RegimeStateTracker}, o {@link RegimeRegistry} é atualizado e o evento
+     * é persistido no {@link RegimeHistoryService} em virtual thread.
      *
      * @param symbol   símbolo do ativo que recebeu o novo candle
      * @param snapshot snapshot imutável do histórico atual do ativo
@@ -151,6 +120,7 @@ public class MarketRegimeMonitor {
 
         if (counter < DECIMATION_INTERVAL) return;
 
+        // Reseta o contador e aciona a avaliação de regime
         decimationCounterBySymbol.put(symbol, 0);
 
         evaluateRegime(symbol, snapshot);
@@ -161,24 +131,22 @@ public class MarketRegimeMonitor {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Avalia o regime a partir de snapshot histórico sem registrar
-     * eventos no RegimeHistoryService.
+     * Avalia o regime a partir de um snapshot histórico sem registrar eventos no
+     * {@link RegimeHistoryService} nem gerar logs de transição intermediária.
      *
-     * Usado exclusivamente pelo StrategyEngine.evaluateRegimeFromHistory()
-     * durante o warm-up inicial. Compartilha os contadores de decimação
-     * com o runtime para garantir continuidade exata entre as duas fases.
+     * Utilizado exclusivamente pelo
+     * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine#evaluateRegimeFromHistory()}
+     * durante o warm-up inicial. Compartilha os contadores de decimação com o runtime,
+     * garantindo continuidade exata dos ciclos entre as duas fases.
      *
-     * Diferenças em relação a onBar():
-     * - Não grava no RegimeHistoryService (dados históricos)
-     * - Não gera logs de transições intermediárias do histórico
-     * - Usa updateRegimeSilently() no RegimeRegistry
-     *
-     * O regime final confirmado ao término do warm-up é logado
-     * pelo StrategyEngine via getConfirmedRegime().
+     * Quando uma transição é confirmada, atualiza o {@link RegimeRegistry} via
+     * {@link RegimeRegistry#updateRegimeSilently} sem log nem gravação em arquivo.
+     * O regime final confirmado é logado pelo
+     * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}
+     * ao término do warm-up via {@link #getConfirmedRegime}.
      *
      * @param symbol   símbolo do ativo
      * @param snapshot snapshot parcial do histórico em ordem cronológica
-     * @since v5.4.2
      */
     public void evaluateForWarmUp(String symbol, List<Bar> snapshot) {
         if (symbol == null || symbol.isBlank()) return;
@@ -194,14 +162,13 @@ public class MarketRegimeMonitor {
     }
 
     /**
-     * Retorna o regime confirmado atual para um símbolo.
-     *
-     * Delega para o RegimeStateTracker para leitura do estado interno.
-     * Usado pelo StrategyEngine para logar o regime final após o warm-up.
+     * Retorna o regime confirmado atual para o símbolo informado.
+     * Delega para o {@link RegimeStateTracker}, que mantém o estado interno por símbolo.
+     * Utilizado pelo {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}
+     * para registrar o regime final ao término do warm-up.
      *
      * @param symbol símbolo do ativo
-     * @return regime confirmado ou CHOPPY se nenhum confirmado ainda
-     * @since v5.4.2
+     * @return regime confirmado ou {@link MarketRegime#CHOPPY} se nenhum foi confirmado ainda
      */
     public MarketRegime getConfirmedRegime(String symbol) {
         return stateTracker.getCurrentRegime(symbol);
@@ -212,21 +179,20 @@ public class MarketRegimeMonitor {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Executa o pipeline completo de classificação e persistência de regime.
-     *
-     * Quando a transição é confirmada:
-     * - RegimeRegistry.updateRegime() → log operacional
-     * - RegimeHistoryService.record() → JSON diário
+     * Executa o pipeline completo de classificação e persistência de regime em tempo real.
+     * Extrai a janela de observação, classifica o regime via {@link MarketRegimeClassifier}
+     * e passa para o {@link RegimeStateTracker} aplicar o filtro de persistência.
+     * Quando a transição é confirmada, atualiza o {@link RegimeRegistry} com log
+     * e persiste o evento no {@link RegimeHistoryService} em virtual thread.
      *
      * @param symbol   símbolo do ativo
-     * @param snapshot histórico completo disponível
+     * @param snapshot histórico completo disponível para extração da janela
      */
     private void evaluateRegime(String symbol, List<Bar> snapshot) {
         List<Bar> window = extractWindow(snapshot);
 
         if (window.size() < 60) {
-            log.debug("REGIME MONITOR | symbol={} | window too small "
-                            + "({} bars), skipping",
+            log.debug("REGIME MONITOR | symbol={} | window too small ({} bars), skipping",
                     symbol, window.size());
             return;
         }
@@ -245,18 +211,16 @@ public class MarketRegimeMonitor {
     }
 
     /**
-     * Callback invocado pelo RegimeStateTracker quando uma transição
-     * é confirmada em tempo real.
+     * Callback invocado pelo {@link RegimeStateTracker} quando uma transição é confirmada
+     * em tempo real. Atualiza o {@link RegimeRegistry} e persiste o evento no
+     * {@link RegimeHistoryService} em virtual thread para não bloquear o pipeline de candles.
      *
-     * Responsabilidades:
-     * 1. Atualiza o RegimeRegistry com log operacional
-     * 2. Persiste o evento no arquivo JSON diário via RegimeHistoryService
-     *
-     * @param event evento de mudança de regime confirmado
+     * @param event evento de mudança de regime confirmado após o filtro de persistência
      */
     private void onRegimeConfirmed(RegimeChangeEvent event) {
         regimeRegistry.updateRegime(event.symbol(), event.currentRegime());
 
+        // Persistência em virtual thread para não bloquear o pipeline de candles
         Thread.startVirtualThread(() ->
                 regimeHistoryService.record(event));
     }
@@ -267,12 +231,12 @@ public class MarketRegimeMonitor {
 
     /**
      * Executa o pipeline de classificação de regime sem persistência.
-     *
-     * Idêntico a evaluateRegime() mas o callback de confirmação
-     * usa updateRegimeSilently() — sem log e sem gravação no JSON.
+     * Idêntico a {@link #evaluateRegime} exceto pelo callback de confirmação,
+     * que utiliza {@link RegimeRegistry#updateRegimeSilently} em vez de
+     * {@link RegimeRegistry#updateRegime}, sem log nem gravação em arquivo.
      *
      * @param symbol   símbolo do ativo
-     * @param snapshot histórico disponível para classificação
+     * @param snapshot histórico disponível para extração da janela e classificação
      */
     private void evaluateRegimeForWarmUp(String symbol, List<Bar> snapshot) {
         List<Bar> window = extractWindow(snapshot);
@@ -291,15 +255,11 @@ public class MarketRegimeMonitor {
 
     /**
      * Callback de confirmação de regime durante o warm-up histórico.
+     * Atualiza o {@link RegimeRegistry} silenciosamente sem log nem gravação
+     * no {@link RegimeHistoryService}, pois os dados são históricos e não representam
+     * transições em tempo real.
      *
-     * Atualiza o RegimeRegistry silenciosamente para que o DerivTradeService
-     * tenha o regime correto desde o primeiro trade, mas:
-     * - NÃO grava no RegimeHistoryService (dados históricos)
-     * - NÃO gera log de transição (seria ruído de dados históricos)
-     *
-     * O regime final é logado pelo StrategyEngine ao término do warm-up.
-     *
-     * @param event evento de mudança de regime confirmado no histórico
+     * @param event evento de mudança de regime confirmado nos dados históricos
      */
     private void onRegimeConfirmedWarmUp(RegimeChangeEvent event) {
         regimeRegistry.updateRegimeSilently(event.symbol(), event.currentRegime());
@@ -310,13 +270,11 @@ public class MarketRegimeMonitor {
     // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Extrai a janela de observação do snapshot completo.
-     *
-     * Se o histórico for maior que REGIME_LOOKBACK, retorna apenas
-     * os últimos N candles. Se for menor, retorna tudo disponível.
+     * Extrai os últimos {@value REGIME_LOOKBACK} candles do snapshot completo.
+     * Quando o histórico disponível for menor que o lookback, retorna tudo disponível.
      *
      * @param snapshot histórico completo do ativo
-     * @return sublista com no máximo REGIME_LOOKBACK candles
+     * @return sublista com no máximo {@value REGIME_LOOKBACK} candles mais recentes
      */
     private List<Bar> extractWindow(List<Bar> snapshot) {
         if (snapshot.size() <= REGIME_LOOKBACK) {

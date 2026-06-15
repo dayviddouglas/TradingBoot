@@ -1,45 +1,13 @@
 package com.github.dayviddouglas.TradingBot.engine.decision;
 
 /**
- * Enum que define o modo de decisão do StrategyEngine.
+ * Define o modo de decisão do {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}.
  *
- * O modo de decisão é configurado por ativo no bloco "engine" do
- * strategies.json e determina como o StrategyEngine processa os
- * sinais das estratégias habilitadas para gerar o sinal final.
+ * Configurado por ativo no bloco {@code engine} do strategies.json e determina como o engine
+ * processa os sinais das estratégias habilitadas para produzir o sinal final.
+ * Cada ativo pode utilizar um modo diferente no mesmo sistema, permitindo configurações híbridas.
  *
- * O sistema suporta três modos, cada um com comportamento distinto:
- *
- * ═══════════════════════════════════════════════════════════════
- *
- * CONFLUENCE:
- * - Usa classificação de regime de mercado (TRENDING, RANGING, CHOPPY)
- * - Aplica pesos diferentes por estratégia conforme o regime
- * - Calcula buyScore e sellScore ponderados
- * - Exige score mínimo e controla o score de oposição
- * - Mais sofisticado, mas depende de calibragem correta dos pesos
- * - Requer pelo menos 2 estratégias habilitadas
- *
- * ═══════════════════════════════════════════════════════════════
- *
- * SINGLE_STRATEGY:
- * - Usa o sinal direto da única estratégia habilitada
- * - Sem pesos, sem score, sem regime
- * - O sinal da estratégia vira o sinal final diretamente
- * - Ideal para testar o edge de uma estratégia isoladamente
- * - Requer exatamente 1 estratégia habilitada
- *
- * ═══════════════════════════════════════════════════════════════
- *
- * VOTING:
- * - Votação conservadora por unanimidade
- * - Sem pesos, sem score, sem regime
- * - Só emite sinal quando TODAS as estratégias concordam na mesma direção
- * - Qualquer divergência resulta em NONE
- * - Mais simples que CONFLUENCE, mais rigoroso que SINGLE_STRATEGY
- * - Requer pelo menos 2 estratégias habilitadas
- *
- * ═══════════════════════════════════════════════════════════════
- *
+ * <pre>
  * Exemplo de configuração no strategies.json:
  * {
  *   "engine": {
@@ -47,9 +15,23 @@ package com.github.dayviddouglas.TradingBot.engine.decision;
  *     "decisionMode": "VOTING"
  *   }
  * }
+ * </pre>
  *
- * Cada ativo pode usar um modo diferente no mesmo sistema,
- * permitindo configurações híbridas por ativo.
+ * <b>CONFLUENCE</b>:
+ * Classifica o regime de mercado ({@code TRENDING}, {@code RANGING}, {@code CHOPPY}) e aplica
+ * pesos diferenciados por estratégia conforme o regime. Calcula {@code buyScore} e {@code sellScore}
+ * ponderados e exige score mínimo com controle do score de oposição.
+ * Requer pelo menos 2 estratégias habilitadas.
+ *
+ * <b>SINGLE_STRATEGY</b>:
+ * Utiliza o sinal direto da única estratégia habilitada sem pesos, score ou regime.
+ * Ideal para testar o edge de uma estratégia de forma isolada.
+ * Requer exatamente 1 estratégia habilitada.
+ *
+ * <b>VOTING</b>:
+ * Votação conservadora por unanimidade: emite sinal apenas quando todas as estratégias
+ * concordam na mesma direção. Qualquer divergência resulta em {@code NONE}.
+ * Sem pesos, score ou regime. Requer pelo menos 2 estratégias habilitadas.
  */
 public enum DecisionMode {
     CONFLUENCE,
