@@ -5,6 +5,7 @@ import com.github.dayviddouglas.TradingBot.config.strategy.StrategiesProfile;
 import com.github.dayviddouglas.TradingBot.engine.regime.MarketRegimeMonitor;
 import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.market.TickCandleAggregator;
+import com.github.dayviddouglas.TradingBot.model.Bar;
 import com.github.dayviddouglas.TradingBot.strategy.TradingStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,18 +19,18 @@ import java.util.Optional;
 /**
  * Responsável por construir e armazenar os pipelines de cada ativo.
  *
- * Correção v5:
- * - Injeta MarketRegimeMonitor via construtor.
- * - Usa StrategyEngine.fromProfile() com monitor para runtime.
- * - Backtest continua usando fromProfile() sem monitor (compatibilidade).
+ * Cada pipeline representa o conjunto completo de componentes necessários
+ * para processar um ativo em tempo real, seguindo o fluxo:
+ * {@link TickCandleAggregator} → {@link StrategyEngine} → {@code Signal} → {@code DerivTradeService}.
  *
- * Um pipeline representa o conjunto completo de componentes
- * necessários para processar um ativo em tempo real:
- * TickCandleAggregator → StrategyEngine → Signal → DerivTradeService
+ * O {@link MarketRegimeMonitor} é injetado via construtor e compartilhado entre
+ * todos os pipelines. Cada pipeline notifica o monitor a cada candle processado,
+ * mas o monitor mantém estado isolado por símbolo internamente.
  *
- * Thread-safety: o mapa é populado apenas durante o bootstrap
- * (thread principal) e depois apenas lido pelos callbacks.
- * LinkedHashMap mantém a ordem de inserção para logs previsíveis.
+ * O mapa de pipelines é populado exclusivamente durante o bootstrap do bot
+ * pela thread principal e, após isso, apenas lido pelos callbacks de mercado.
+ * O uso de {@link LinkedHashMap} preserva a ordem de inserção para
+ * garantir logs previsíveis durante a inicialização.
  */
 @Component
 public class PipelineRegistry {
@@ -39,17 +40,20 @@ public class PipelineRegistry {
     private final StrategiesConfigLoader strategiesLoader;
 
     /**
-     * Monitor de regime injetado pelo Spring.
-     *
-     * Compartilhado entre todos os pipelines: cada pipeline notifica
-     * o monitor via StrategyEngine.onBar(), mas o monitor mantém
-     * estado isolado por símbolo internamente (ConcurrentHashMap).
+     * Monitor de regime compartilhado entre todos os pipelines.
+     * Mantém estado isolado por símbolo internamente via {@code ConcurrentHashMap},
+     * recebendo notificações de cada pipeline a cada candle fechado processado
+     * pelo {@link StrategyEngine} correspondente.
      */
     private final MarketRegimeMonitor regimeMonitor;
 
     private final Map<String, BotPipeline> pipelinesBySymbol =
             new LinkedHashMap<>();
 
+    /**
+     * @param strategiesLoader responsável por carregar e construir estratégias a partir do strategies.json
+     * @param regimeMonitor    monitor de regime compartilhado entre todos os pipelines do sistema
+     */
     public PipelineRegistry(
             StrategiesConfigLoader strategiesLoader,
             MarketRegimeMonitor regimeMonitor
@@ -59,12 +63,13 @@ public class PipelineRegistry {
     }
 
     /**
-     * Constrói e registra os pipelines para todos os profiles.
+     * Constrói e registra os pipelines para todos os profiles fornecidos.
      *
      * Profiles sem estratégias habilitadas são ignorados com log de aviso.
+     * Ao final, registra no log o total de pipelines criados com sucesso.
      *
-     * @param profiles      lista de profiles do strategies.json
-     * @param signalHandler callback chamado quando o engine emite sinal
+     * @param profiles      lista de profiles carregados do strategies.json
+     * @param signalHandler callback invocado quando o engine emite um sinal final
      */
     public void buildAll(
             List<StrategiesProfile> profiles,
@@ -82,14 +87,15 @@ public class PipelineRegistry {
      * Retorna o pipeline de um ativo pelo símbolo.
      *
      * @param symbol símbolo do ativo
-     * @return Optional com o pipeline ou vazio se não existir
+     * @return {@link Optional} contendo o pipeline, ou vazio se não existir
      */
     public Optional<BotPipeline> get(String symbol) {
         return Optional.ofNullable(pipelinesBySymbol.get(symbol));
     }
 
     /**
-     * Retorna todos os pipelines registrados.
+     * Retorna uma cópia imutável de todos os pipelines registrados,
+     * indexados pelo símbolo do ativo.
      *
      * @return mapa imutável de pipelines por símbolo
      */
@@ -98,18 +104,19 @@ public class PipelineRegistry {
     }
 
     /**
-     * Retorna todos os símbolos registrados.
+     * Retorna uma cópia imutável de todos os símbolos com pipelines registrados.
      *
-     * @return lista de símbolos
+     * @return lista de símbolos registrados
      */
     public List<String> getSymbols() {
         return List.copyOf(pipelinesBySymbol.keySet());
     }
 
     /**
-     * Retorna todos os profiles registrados.
+     * Retorna os profiles de todos os pipelines registrados,
+     * extraídos diretamente dos {@link BotPipeline} armazenados.
      *
-     * @return lista de profiles
+     * @return lista de profiles dos pipelines ativos
      */
     public List<StrategiesProfile> getProfiles() {
         return pipelinesBySymbol.values().stream()
@@ -118,9 +125,9 @@ public class PipelineRegistry {
     }
 
     /**
-     * Retorna a quantidade de pipelines registrados.
+     * Retorna a quantidade de pipelines atualmente registrados.
      *
-     * @return número de pipelines
+     * @return número de pipelines registrados
      */
     public int size() {
         return pipelinesBySymbol.size();
@@ -130,6 +137,15 @@ public class PipelineRegistry {
     // Construção de pipeline
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Constrói e registra o pipeline completo para um ativo.
+     *
+     * Caso nenhuma estratégia esteja habilitada para o profile,
+     * o pipeline não é criado e um aviso é registrado no log.
+     *
+     * @param profile       configuração do ativo
+     * @param signalHandler callback de sinal final a ser vinculado ao engine
+     */
     private void buildAndRegister(
             StrategiesProfile profile,
             SignalHandler signalHandler
@@ -154,17 +170,16 @@ public class PipelineRegistry {
     }
 
     /**
-     * Constrói o StrategyEngine com MarketRegimeMonitor injetado.
+     * Constrói o {@link StrategyEngine} com o {@link MarketRegimeMonitor} injetado.
      *
-     * Usa StrategyEngine.fromProfile() com monitor para garantir que
-     * o monitoramento de regime seja ativado em todos os pipelines
-     * de runtime. O monitor é o mesmo bean compartilhado por todos
-     * os pipelines, mas mantém estado isolado por símbolo internamente.
+     * O monitor compartilhado é passado ao engine para que cada candle processado
+     * notifique o monitoramento de regime do ativo correspondente. O callback de
+     * sinal final vincula o engine ao {@link SignalHandler} fornecido pelo runner.
      *
-     * @param profile       profile do ativo
-     * @param strategies    estratégias habilitadas
-     * @param signalHandler callback de sinal final
-     * @return StrategyEngine configurado com monitoramento de regime
+     * @param profile       configuração do ativo
+     * @param strategies    estratégias habilitadas para o ativo
+     * @param signalHandler callback invocado ao emitir sinal final
+     * @return engine configurado com monitoramento de regime ativo
      */
     private StrategyEngine buildEngine(
             StrategiesProfile profile,
@@ -183,6 +198,17 @@ public class PipelineRegistry {
         return engine;
     }
 
+    /**
+     * Constrói o {@link TickCandleAggregator} vinculado ao engine do ativo.
+     *
+     * Configura o agregador com a granularidade em segundos definida no profile
+     * e registra {@link StrategyEngine#onBar(Bar)} como callback de candle fechado,
+     * acionado a cada vez que um novo candle é completado pelo agregador.
+     *
+     * @param profile configuração do ativo com a granularidade em segundos
+     * @param engine  engine que receberá os candles fechados
+     * @return agregador configurado para o ativo
+     */
     private TickCandleAggregator buildAggregator(
             StrategiesProfile profile,
             StrategyEngine engine
@@ -193,6 +219,16 @@ public class PipelineRegistry {
         );
     }
 
+    /**
+     * Registra no log os detalhes do pipeline criado para um ativo.
+     *
+     * Inclui símbolo, granularidade, capacidade de barras, quantidade de estratégias,
+     * configuração de trade, modo de decisão, parâmetros de range e confirmação
+     * de que o monitoramento de regime está ativo.
+     *
+     * @param profile    configuração do ativo
+     * @param strategies estratégias habilitadas no pipeline
+     */
     private void logPipelineRegistered(
             StrategiesProfile profile,
             List<TradingStrategy> strategies

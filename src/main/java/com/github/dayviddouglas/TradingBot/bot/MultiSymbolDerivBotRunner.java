@@ -19,19 +19,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Orquestrador principal do bot em tempo real.
  *
- * Correção v5.3:
- * O fluxo de inicialização foi simplificado. Com o novo modelo OTP
- * da Deriv, a autenticação acontece antes da conexão WebSocket ser
- * estabelecida. Quando onConnected é disparado, o bot já está
- * autenticado e pode operar diretamente — sem etapa de authorize.
+ * Ponto de entrada da aplicação via {@link CommandLineRunner}.
+ * Coordena o ciclo de vida completo do bot: carregamento de configurações,
+ * construção de pipelines por ativo, registro de callbacks de mercado e
+ * de conexão, e estabelecimento da conexão WebSocket com a API da Deriv.
  *
- * Fluxo atualizado:
- * 1. Carrega profiles do strategies.json
- * 2. Constrói pipelines via PipelineRegistry
- * 3. Registra callbacks de mercado
- * 4. Registra callbacks de conexão
- * 5. Conecta WebSocket (OTP obtido automaticamente pelo DerivWsClient)
- * 6. Aguarda indefinidamente
+ * Também atua como ponto de retomada após reconexões WebSocket, expondo
+ * {@link #reconnectionBot()} para ser invocado pelo {@link DerivWsClient}
+ * quando uma reconexão bem-sucedida é detectada.
+ *
+ * Colabora com:
+ * <ul>
+ *   <li>{@link StrategiesConfigLoader} — carrega os profiles de estratégia.</li>
+ *   <li>{@link PipelineRegistry} — constrói e mantém os pipelines por ativo.</li>
+ *   <li>{@link BotInitializer} — executa a inicialização pós-conexão.</li>
+ *   <li>{@link DerivWsClient} — gerencia a conexão WebSocket.</li>
+ *   <li>{@link DerivMarketDataService} — fornece ticks e histórico de candles.</li>
+ *   <li>{@link DerivTradeService} — recebe sinais finais para execução de contratos.</li>
+ * </ul>
  */
 @Component
 public class MultiSymbolDerivBotRunner implements CommandLineRunner {
@@ -46,6 +51,11 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
     private final PipelineRegistry       pipelineRegistry;
     private final BotInitializer         botInitializer;
 
+    /**
+     * Controla se a inicialização pós-conexão já foi executada.
+     * Impede dupla execução de {@link #initializeAfterConnection()}
+     * em cenários de reconexão rápida.
+     */
     private final AtomicBoolean initialized = new AtomicBoolean(false);
 
     public MultiSymbolDerivBotRunner(
@@ -76,76 +86,105 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
     // ═══════════════════════════════════════════════════════════════
     // Callbacks de conexão
     // ═══════════════════════════════════════════════════════════════
-  public void connectBot (){
-      List<StrategiesProfile> profiles =
-              strategiesLoader.getProfiles();
 
-      if (profiles.isEmpty()) {
-          log.error("No profiles loaded from strategies.json. Aborting.");
-          return;
-      }
+    /**
+     * Executa o fluxo completo de inicialização e conexão do bot.
+     *
+     * Carrega os profiles do strategies.json, constrói os pipelines,
+     * registra os callbacks de mercado e de conexão, estabelece a
+     * conexão WebSocket e bloqueia a thread corrente indefinidamente
+     * para manter o processo ativo.
+     *
+     * Interrompido apenas por sinal externo (ex: Ctrl+C).
+     */
+    public void connectBot() {
+        List<StrategiesProfile> profiles =
+                strategiesLoader.getProfiles();
 
-      log.info("BOT STARTING | profiles={}", profiles.size());
+        if (profiles.isEmpty()) {
+            log.error("No profiles loaded from strategies.json. Aborting.");
+            return;
+        }
 
-      pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
+        log.info("BOT STARTING | profiles={}", profiles.size());
 
-      if (pipelineRegistry.size() == 0) {
-          log.error("No valid pipelines built. Aborting.");
-          return;
-      }
+        pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
 
-      registerMarketCallbacks();
-      registerConnectionCallbacks();
+        if (pipelineRegistry.size() == 0) {
+            log.error("No valid pipelines built. Aborting.");
+            return;
+        }
 
-      log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
+        registerMarketCallbacks();
+        registerConnectionCallbacks();
 
-      // OTP é obtido automaticamente pelo DerivWsClient
-      // via uriSupplier antes de conectar
-      derivWsClient.connect();
+        log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
 
-      log.info("BOT RUNNING | Press Ctrl+C to stop.");
-      try {
+        // OTP é obtido automaticamente pelo DerivWsClient
+        // via uriSupplier antes de conectar
+        derivWsClient.connect();
 
-          Thread.currentThread().join();
+        log.info("BOT RUNNING | Press Ctrl+C to stop.");
+        try {
+            // Bloqueia a thread principal para manter o processo ativo
+            Thread.currentThread().join();
 
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-      } catch (InterruptedException e) {
-          throw new RuntimeException(e);
-      }
+    /**
+     * Retomada do bot após uma reconexão WebSocket bem-sucedida.
+     *
+     * Reinicializa os pipelines existentes, recarrega os profiles,
+     * reconstrói os pipelines e reregistra os callbacks de mercado.
+     * Bloqueia a thread corrente ao final, mantendo o bot operacional
+     * até a próxima desconexão ou interrupção.
+     *
+     * Invocado pelo {@link DerivWsClient} quando a reconexão é confirmada.
+     */
+    public void reconnectionBot() {
+        log.info("WS CONNECTED | initializing pipelines...");
 
-  }
+        // Reinicializa os pipelines com os dados já disponíveis no registry
+        botInitializer.initialize(pipelineRegistry.getAll());
 
+        List<StrategiesProfile> profiles =
+                strategiesLoader.getProfiles();
+        if (profiles.isEmpty()) {
+            log.error("No profiles loaded from strategies.json. Aborting.");
+            return;
+        }
 
-  public void reconnectionBot(){
-      log.info("WS CONNECTED | initializing pipelines...");
-      botInitializer.initialize(pipelineRegistry.getAll());
-      List<StrategiesProfile> profiles =
-              strategiesLoader.getProfiles();
-      if (profiles.isEmpty()) {
-          log.error("No profiles loaded from strategies.json. Aborting.");
-          return;
-      }
+        log.info("BOT STARTING | profiles={}", profiles.size());
 
+        pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
 
-      log.info("BOT STARTING | profiles={}", profiles.size());
+        if (pipelineRegistry.size() == 0) {
+            log.error("No valid pipelines built. Aborting.");
+            return;
+        }
 
-      pipelineRegistry.buildAll(profiles, this::handleFinalSignal);
+        registerMarketCallbacks();
 
-      if (pipelineRegistry.size() == 0) {
-          log.error("No valid pipelines built. Aborting.");
-          return;
-      }
+        log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
+        log.info("BOT RUNNING | Press Ctrl+C to stop.");
+        try {
+            // Bloqueia a thread corrente para manter o bot operacional
+            Thread.currentThread().join();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-      registerMarketCallbacks();
-
-      log.info("BOT CONNECTING | symbols={}", pipelineRegistry.size());
-      log.info("BOT RUNNING | Press Ctrl+C to stop.");
-      try {
-          Thread.currentThread().join();
-      } catch (InterruptedException e) {
-          throw new RuntimeException(e);
-      }
-  }
+    /**
+     * Registra os callbacks de conexão e desconexão no {@link DerivWsClient}.
+     *
+     * O callback de conexão delega a inicialização para
+     * {@link #initializeAfterConnection()}, protegida contra dupla execução.
+     * O callback de desconexão registra o evento via log de alerta.
+     */
     private void registerConnectionCallbacks() {
         derivWsClient.setOnConnected(() -> {
             try {
@@ -164,10 +203,9 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
     /**
      * Executado após conexão WebSocket bem-sucedida.
      *
-     * Correção v5.3: não há mais etapa de authorize — o bot já está
-     * autenticado via OTP embutido na URL de conexão.
-     * O initialized.compareAndSet evita dupla inicialização em
-     * reconexões rápidas.
+     * O {@code initialized.compareAndSet} garante que a inicialização
+     * dos pipelines ocorra apenas uma vez, mesmo que o callback de
+     * conexão seja disparado múltiplas vezes em reconexões rápidas.
      */
     private void initializeAfterConnection() {
         if (!initialized.compareAndSet(false, true)) {
@@ -183,11 +221,25 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
     // Callbacks de mercado
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Registra os callbacks de ticks e de histórico de candles
+     * no {@link DerivMarketDataService}.
+     */
     private void registerMarketCallbacks() {
         marketDataService.onTick(this::handleTick);
         marketDataService.onCandleHistory(this::handleCandleHistory);
     }
 
+    /**
+     * Processa um tick recebido em tempo real.
+     *
+     * Descarta o tick se os dados forem inválidos e, caso contrário,
+     * repassa ao agregador do pipeline correspondente ao símbolo.
+     *
+     * @param symbol símbolo do ativo
+     * @param epoch  timestamp do tick em segundos
+     * @param quote  preço do tick
+     */
     private void handleTick(String symbol, long epoch, double quote) {
         if (isInvalidTick(symbol, epoch, quote)) return;
 
@@ -195,6 +247,16 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
                 pipeline.aggregator().onTick(epoch, quote));
     }
 
+    /**
+     * Processa o histórico de candles recebido em resposta a uma requisição.
+     *
+     * Resolve o símbolo a partir do ID da requisição via {@link BotInitializer}.
+     * Caso o símbolo seja identificado, alimenta o histórico no engine do pipeline
+     * e dispara a avaliação de regime a partir dos dados históricos carregados.
+     *
+     * @param reqId ID da requisição que originou este histórico
+     * @param bars  lista de candles recebidos
+     */
     private void handleCandleHistory(Long reqId, List<Bar> bars) {
         String symbol = botInitializer.resolveHistorySymbol(reqId);
 
@@ -208,10 +270,23 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
             log.info("HISTORY SEEDED | symbol={} | bars={}",
                     symbol, bars.size());
 
+            // Avalia o regime de mercado a partir do histórico recém-carregado,
+            // permitindo que o bot inicie com o regime já confirmado
             pipeline.engine().evaluateRegimeFromHistory();
         });
     }
 
+    /**
+     * Valida se os dados de um tick são utilizáveis para processamento.
+     *
+     * Considera inválido qualquer tick com símbolo nulo ou em branco,
+     * epoch não positivo ou preço não finito.
+     *
+     * @param symbol símbolo do ativo
+     * @param epoch  timestamp do tick em segundos
+     * @param quote  preço do tick
+     * @return {@code true} se o tick for inválido, {@code false} caso contrário
+     */
     private boolean isInvalidTick(
             String symbol, long epoch, double quote
     ) {
@@ -225,6 +300,17 @@ public class MultiSymbolDerivBotRunner implements CommandLineRunner {
     // Tratamento de sinal final
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Processa um sinal final gerado pelo {@link StrategyEngine} de um ativo.
+     *
+     * Registra o sinal via log e encaminha para o {@link DerivTradeService},
+     * junto com o snapshot recente de candles do engine, para avaliação
+     * e eventual execução de contrato.
+     *
+     * @param profile configuração do ativo que gerou o sinal
+     * @param engine  engine do ativo que gerou o sinal
+     * @param signal  sinal operacional produzido
+     */
     private void handleFinalSignal(
             StrategiesProfile profile,
             StrategyEngine engine,

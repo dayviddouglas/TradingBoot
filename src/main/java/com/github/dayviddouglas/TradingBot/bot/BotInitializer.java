@@ -14,17 +14,20 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Responsável pela inicialização pós-conexão do bot.
  *
- * Correção v5.3:
- * O passo de autorização foi removido. Com o novo modelo OTP da Deriv,
- * a autenticação acontece na URL do WebSocket antes da conexão ser
- * estabelecida. Quando o callback onConnected é disparado, o bot
- * já está autenticado e pode operar diretamente.
+ * Executa, em sequência, as três etapas obrigatórias após o
+ * estabelecimento da conexão WebSocket:
+ * <ol>
+ *   <li>Valida a disponibilidade de contratos CALL e PUT por ativo.</li>
+ *   <li>Solicita o histórico de candles para cada ativo registrado.</li>
+ *   <li>Subscreve o feed de ticks em tempo real por ativo.</li>
+ * </ol>
  *
- * Sequência de inicialização atualizada:
- * 1. ~~Autoriza sessão~~ — removido (autenticação via OTP na URL)
- * 2. Valida disponibilidade de trade por ativo
- * 3. Solicita histórico de candles por ativo
- * 4. Subscreve ticks em tempo real por ativo
+ * Mantém internamente o mapeamento entre IDs de requisição de histórico
+ * e seus respectivos símbolos, permitindo que respostas assíncronas
+ * sejam correlacionadas ao ativo correto via {@link #resolveHistorySymbol(Long)}.
+ *
+ * Colabora com {@link DerivMarketDataService} para operações de mercado
+ * e com {@link DerivTradeService} para validação de disponibilidade de contratos.
  */
 @Component
 public class BotInitializer {
@@ -35,6 +38,12 @@ public class BotInitializer {
     private final DerivMarketDataService marketDataService;
     private final DerivTradeService tradeService;
 
+    /**
+     * Mapa de correlação entre IDs de requisição de histórico e símbolos.
+     * Entradas são inseridas em {@link #requestHistoryForPipeline(BotPipeline)}
+     * e removidas em {@link #resolveHistorySymbol(Long)}, garantindo
+     * que cada requisição seja resolvida exatamente uma vez.
+     */
     private final Map<Long, String> historyReqIdToSymbol =
             new ConcurrentHashMap<>();
 
@@ -49,9 +58,11 @@ public class BotInitializer {
     /**
      * Executa a sequência completa de inicialização pós-conexão.
      *
-     * Correção v5.3: authorize removido — bot já autenticado via OTP.
+     * Itera sobre todos os pipelines registrados e, para cada um,
+     * executa as etapas de validação de trade, requisição de histórico
+     * e subscrição de ticks, nessa ordem.
      *
-     * @param pipelines mapa de pipelines registrados por símbolo
+     * @param pipelines mapa de pipelines ativos, indexados por símbolo
      */
     public void initialize(Map<String, BotPipeline> pipelines) {
         validateAllTradeAvailabilities(pipelines);
@@ -62,10 +73,14 @@ public class BotInitializer {
     }
 
     /**
-     * Correlaciona um reqId de histórico com o símbolo correspondente.
+     * Resolve o símbolo associado a um ID de requisição de histórico.
      *
-     * @param reqId ID da requisição de histórico
-     * @return símbolo correspondente ou null se não encontrado
+     * Remove a entrada do mapa após a resolução, garantindo que cada
+     * ID seja consumido uma única vez. Retorna {@code null} quando o
+     * ID não corresponde a nenhuma requisição pendente.
+     *
+     * @param reqId ID da requisição de histórico retornado pela API
+     * @return símbolo correspondente, ou {@code null} se não encontrado
      */
     public String resolveHistorySymbol(Long reqId) {
         return historyReqIdToSymbol.remove(reqId);
@@ -75,6 +90,12 @@ public class BotInitializer {
     // Validação de disponibilidade de trade
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Valida a disponibilidade de contratos para todos os ativos
+     * com trade habilitado nos pipelines fornecidos.
+     *
+     * @param pipelines mapa de pipelines ativos, indexados por símbolo
+     */
     private void validateAllTradeAvailabilities(
             Map<String, BotPipeline> pipelines
     ) {
@@ -84,6 +105,12 @@ public class BotInitializer {
                 .forEach(this::validateTradeAvailability);
     }
 
+    /**
+     * Verifica se os contratos CALL e PUT estão disponíveis para o ativo,
+     * registrando o resultado via log informativo ou de alerta.
+     *
+     * @param profile configuração do ativo a ser validado
+     */
     private void validateTradeAvailability(StrategiesProfile profile) {
         String      symbol = profile.getSymbol();
         TradeConfig trade  = profile.getTrade();
@@ -108,6 +135,15 @@ public class BotInitializer {
         }
     }
 
+    /**
+     * Verifica a disponibilidade de um tipo específico de contrato
+     * para o ativo informado, delegando a consulta ao {@link DerivTradeService}.
+     *
+     * @param symbol       símbolo do ativo
+     * @param contractType tipo do contrato a verificar (ex: "CALL" ou "PUT")
+     * @param trade        configuração de trade com parâmetros financeiros
+     * @return {@code true} se o contrato está disponível, {@code false} caso contrário
+     */
     private boolean checkContract(
             String symbol,
             String contractType,
@@ -127,6 +163,11 @@ public class BotInitializer {
     // Histórico de candles
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Solicita o histórico de candles para todos os pipelines registrados.
+     *
+     * @param pipelines mapa de pipelines ativos, indexados por símbolo
+     */
     private void requestAllHistories(
             Map<String, BotPipeline> pipelines
     ) {
@@ -134,6 +175,13 @@ public class BotInitializer {
                 .forEach(this::requestHistoryForPipeline);
     }
 
+    /**
+     * Solicita o histórico de candles para um pipeline específico,
+     * registrando o ID da requisição no mapa de correlação para
+     * resolução posterior da resposta assíncrona.
+     *
+     * @param pipeline pipeline do ativo para o qual o histórico será requisitado
+     */
     private void requestHistoryForPipeline(BotPipeline pipeline) {
         StrategiesProfile profile     = pipeline.profile();
         String            symbol      = profile.getSymbol();
@@ -143,6 +191,8 @@ public class BotInitializer {
         long reqId = marketDataService.fetchCandleHistory(
                 symbol, granularity, count);
 
+        // Registra a correlação entre o ID da requisição e o símbolo
+        // para que a resposta assíncrona possa ser roteada corretamente
         historyReqIdToSymbol.put(reqId, symbol);
 
         log.info("HISTORY REQUESTED | symbol={} | granularity={}s "
@@ -154,6 +204,12 @@ public class BotInitializer {
     // Subscrição de ticks
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Subscreve o feed de ticks em tempo real para todos os símbolos
+     * dos pipelines registrados.
+     *
+     * @param pipelines mapa de pipelines ativos, indexados por símbolo
+     */
     private void subscribeAllTicks(
             Map<String, BotPipeline> pipelines
     ) {
@@ -161,6 +217,12 @@ public class BotInitializer {
                 .forEach(this::subscribeTicksForSymbol);
     }
 
+    /**
+     * Subscreve o feed de ticks em tempo real para um símbolo específico,
+     * delegando a operação ao {@link DerivMarketDataService}.
+     *
+     * @param symbol símbolo do ativo a ser subscrito
+     */
     private void subscribeTicksForSymbol(String symbol) {
         marketDataService.subscribeTicks(symbol);
         log.info("TICKS SUBSCRIBED | symbol={}", symbol);

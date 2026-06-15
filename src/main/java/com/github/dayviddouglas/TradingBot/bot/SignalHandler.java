@@ -5,23 +5,24 @@ import com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine;
 import com.github.dayviddouglas.TradingBot.model.Signal;
 
 /**
- * Interface funcional para tratamento de sinais finais emitidos pelo StrategyEngine.
+ * Interface funcional para tratamento de sinais finais emitidos pelo {@link StrategyEngine}.
  *
- * Implementada pelo MultiSymbolDerivBotRunner para despachar sinais
- * ao DerivTradeService com o contexto completo da operação.
+ * Implementada pelo {@code MultiSymbolDerivBotRunner} para receber sinais gerados
+ * pelos engines de cada ativo e despachá-los ao {@code DerivTradeService} com
+ * o contexto completo da operação: profile do ativo, engine e sinal produzido.
  *
- * @FunctionalInterface garante compatibilidade com lambdas e
- * method references, facilitando o registro no PipelineRegistry.
+ * Registrada no {@link PipelineRegistry} durante a construção dos pipelines,
+ * sendo invocada via method reference ou lambda a cada sinal final emitido.
  */
 @FunctionalInterface
 public interface SignalHandler {
 
     /**
-     * Chamado quando o StrategyEngine emite um sinal final operável.
+     * Invocado quando o {@link StrategyEngine} emite um sinal final operável.
      *
-     * @param profile configuração do ativo que gerou o sinal
-     * @param engine  engine que emitiu o sinal (fornece barras recentes)
-     * @param signal  sinal final (BUY ou SELL)
+     * @param profile configuração do ativo que originou o sinal
+     * @param engine  engine que emitiu o sinal, utilizado para obter barras recentes
+     * @param signal  sinal final gerado (BUY ou SELL)
      */
     void handle(StrategiesProfile profile, StrategyEngine engine, Signal signal);
 }
