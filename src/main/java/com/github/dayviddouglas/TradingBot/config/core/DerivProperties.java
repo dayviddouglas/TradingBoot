@@ -7,25 +7,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * Classe de mapeamento de propriedades externas da Deriv.
+ * Mapeamento das propriedades externas do bloco {@code deriv} definidas no {@code application.yml}.
  *
- * Correção v5.3:
- * A arquitetura de autenticação da Deriv mudou de token direto via
- * WebSocket para OAuth 2.0 + OTP via REST. Os campos foram atualizados
- * para refletir o novo modelo:
+ * Centraliza as credenciais e parâmetros necessários para autenticação e
+ * operação do bot com a API da Deriv. As propriedades são validadas no
+ * startup da aplicação, garantindo falha rápida em caso de configuração incompleta.
  *
- * - token     → removido (substituído por accessToken)
- * - appId     → mantido como String (alfanumérico)
- * - accessToken → novo: token de acesso usado no header Authorization
- * - accountId   → novo: ID da conta usado no path do endpoint OTP
- * - historyCount → mantido
- *
- * Novo fluxo de conexão:
- * 1. REST POST /trading/v1/options/accounts/{accountId}/otp
- *    Header: Authorization: Bearer accessToken
- *    Header: Deriv-App-ID: appId
- * 2. Resposta retorna URL do WebSocket com OTP embutido
- * 3. Bot conecta na URL retornada — sem authorize adicional
+ * Fluxo de autenticação suportado por estas propriedades:
+ * <ol>
+ *   <li>REST POST {@code /trading/v1/options/accounts/{accountId}/otp}
+ *       com {@code Authorization: Bearer {accessToken}} e {@code Deriv-App-ID: {appId}}.</li>
+ *   <li>A resposta retorna a URL do WebSocket com OTP embutido.</li>
+ *   <li>O bot conecta na URL retornada sem etapa adicional de autorização.</li>
+ * </ol>
  */
 @Validated
 @ConfigurationProperties(prefix = "deriv")
@@ -33,36 +27,31 @@ public class DerivProperties {
 
     /**
      * Identificador da aplicação registrada na plataforma Deriv.
-     * Formato alfanumérico — enviado no header Deriv-App-ID nas
-     * chamadas REST.
+     * Enviado no header {@code Deriv-App-ID} nas chamadas REST para obtenção do OTP.
+     * Formato alfanumérico.
      */
     @NotBlank
     private String appId;
 
     /**
-     * Token de acesso OAuth da conta Deriv.
-     * Enviado no header Authorization: Bearer {accessToken}
-     * nas chamadas REST para obter o OTP.
-     *
-     * ⚠️ Nunca versione este valor diretamente no código.
-     * Use variáveis de ambiente: access-token: ${DERIV_ACCESS_TOKEN}
+     * Token de acesso pessoal (PAT) da conta Deriv.
+     * Enviado no header {@code Authorization: Bearer {accessToken}}
+     * nas chamadas REST para obtenção do OTP.
      */
     @NotBlank
     private String accessToken;
 
     /**
-     * ID da conta Deriv usada pelo bot.
-     * Enviado no path do endpoint OTP:
-     * POST /trading/v1/options/accounts/{accountId}/otp
-     *
-     * Exemplo: DOT91022841 (conta demo)
+     * Identificador da conta Deriv operada pelo bot.
+     * Compõe o path do endpoint REST de obtenção do OTP:
+     * {@code /trading/v1/options/accounts/{accountId}/otp}.
      */
     @NotBlank
     private String accountId;
 
     /**
-     * Quantidade de candles históricos a serem carregados por símbolo
-     * durante a inicialização do sistema.
+     * Quantidade de candles históricos carregados por símbolo
+     * durante a inicialização do bot. Limitado entre 10 e 5000.
      */
     @Min(10)
     @Max(5000)

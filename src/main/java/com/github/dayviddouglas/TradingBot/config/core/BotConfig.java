@@ -14,23 +14,33 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 /**
- * Classe de configuração central do bot.
+ * Configuração central da infraestrutura do bot.
  *
- * Correção v5.3:
- * A URL do WebSocket agora é dinâmica — obtida via REST antes de cada
- * conexão através do DerivOtpService. O BotConfig orquestra essa cadeia:
+ * Orquestra a cadeia de dependências necessária para estabelecer
+ * a conexão WebSocket autenticada com a API da Deriv:
  *
+ * <pre>
  * DerivOtpService → uriSupplier → DerivWsClient → DerivMarketDataService
+ * </pre>
  *
- * O DerivWsClient recebe um Supplier<URI> em vez de uma URI fixa,
- * garantindo que cada conexão (inicial e reconexões) use um OTP fresco.
+ * O {@link DerivWsClient} primário recebe um {@code Supplier<URI>} que invoca
+ * {@link DerivOtpService#fetchWsUri()} antes de cada conexão, garantindo que
+ * tanto a conexão inicial quanto as reconexões automáticas utilizem sempre
+ * um OTP válido e atualizado.
+ *
+ * Um segundo bean de {@link DerivWsClient} é registrado para viabilizar a
+ * injeção do {@link MultiSymbolDerivBotRunner} no cliente WebSocket, permitindo
+ * que reconexões bem-sucedidas acionem o fluxo de retomada do bot.
  */
 @Configuration
 @EnableConfigurationProperties(DerivProperties.class)
 public class BotConfig {
 
     /**
-     * Cria o monitor de chegada de ticks como bean singleton.
+     * Monitor de chegada de ticks compartilhado entre {@link DerivWsClient}
+     * e {@link DerivMarketDataService}.
+     *
+     * @return instância singleton de {@link TickHeartbeat}
      */
     @Bean
     public TickHeartbeat tickHeartbeat() {
@@ -38,7 +48,10 @@ public class BotConfig {
     }
 
     /**
-     * Cria o ObjectMapper compartilhado.
+     * {@link ObjectMapper} compartilhado entre os componentes que
+     * realizam serialização e desserialização de mensagens JSON.
+     *
+     * @return instância singleton de {@link ObjectMapper}
      */
     @Bean
     public ObjectMapper objectMapper() {
@@ -46,12 +59,12 @@ public class BotConfig {
     }
 
     /**
-     * Cria o serviço de OTP responsável por obter a URL autenticada
-     * do WebSocket via REST antes de cada conexão.
+     * Serviço responsável por obter o OTP via REST e retornar
+     * a URI autenticada do WebSocket antes de cada conexão.
      *
-     * @param props        propriedades da Deriv
-     * @param objectMapper mapper compartilhado
-     * @return instância de DerivOtpService
+     * @param props        propriedades da Deriv lidas do application.yml
+     * @param objectMapper mapper compartilhado para desserialização da resposta REST
+     * @return instância de {@link DerivOtpService}
      */
     @Bean
     public DerivOtpService derivOtpService(
@@ -62,34 +75,50 @@ public class BotConfig {
     }
 
     /**
-     * Cria o cliente WebSocket com URI dinâmica via OTP.
+     * Cliente WebSocket primário, configurado com URI dinâmica via OTP.
      *
-     * Correção v5.3: em vez de URI fixa, recebe um Supplier<URI>
-     * que chama DerivOtpService.fetchWsUri() antes de cada conexão.
-     * Isso garante que reconexões automáticas sempre usem um OTP fresco.
+     * O {@code Supplier<URI>} é resolvido apenas no momento da conexão,
+     * nunca durante o startup do Spring, evitando chamadas REST prematuras.
+     * Marcado como {@code @Primary} para ser injetado por padrão onde
+     * {@link DerivWsClient} for requerido.
      *
-     * @param otpService    serviço que obtém OTP e retorna WS URI
+     * @param otpService    serviço que fornece a URI autenticada do WebSocket
      * @param tickHeartbeat monitor de ticks compartilhado
-     * @return instância de DerivWsClient configurada
+     * @return instância principal de {@link DerivWsClient}
      */
     @Bean
     @Primary
     public DerivWsClient derivWsClient(
             DerivOtpService otpService,
             TickHeartbeat tickHeartbeat
-
     ) {
         return new DerivWsClient(otpService::fetchWsUri, tickHeartbeat);
     }
 
+    /**
+     * Cliente WebSocket secundário que recebe o {@link MultiSymbolDerivBotRunner}.
+     *
+     * Viabiliza a injeção do runner no {@link DerivWsClient}, permitindo que
+     * reconexões bem-sucedidas acionem {@link MultiSymbolDerivBotRunner#reconnectionBot()}
+     * para retomar o fluxo operacional do bot.
+     *
+     * @param multiSymbolDerivBotRunner orquestrador principal do bot
+     * @return instância secundária de {@link DerivWsClient}
+     */
     @Bean
-    public DerivWsClient derivWsClientSecond(MultiSymbolDerivBotRunner multiSymbolDerivBotRunner){
-      return new DerivWsClient(multiSymbolDerivBotRunner);
+    public DerivWsClient derivWsClientWithMultiSymbolDerivBotRunner(
+            MultiSymbolDerivBotRunner multiSymbolDerivBotRunner
+    ) {
+        return new DerivWsClient(multiSymbolDerivBotRunner);
     }
 
     /**
-     * Cria o sender responsável por enviar requests e correlacionar
-     * respostas via CompletableFuture indexadas por req_id.
+     * Sender responsável por enviar requisições ao WebSocket e correlacionar
+     * as respostas assíncronas via {@code CompletableFuture} indexadas por {@code req_id}.
+     *
+     * @param wsClient     cliente WebSocket primário
+     * @param objectMapper mapper compartilhado para serialização de requisições
+     * @return instância de {@link DerivRequestSender}
      */
     @Bean
     public DerivRequestSender derivRequestSender(
@@ -100,7 +129,11 @@ public class BotConfig {
     }
 
     /**
-     * Cria o paginador para histórico de candles.
+     * Paginador responsável por gerenciar o download do histórico de candles
+     * com suporte a múltiplas páginas de requisição.
+     *
+     * @param requestSender sender utilizado para enviar as requisições paginadas
+     * @return instância de {@link DerivHistoryPaginator}
      */
     @Bean
     public DerivHistoryPaginator derivHistoryPaginator(
@@ -110,7 +143,15 @@ public class BotConfig {
     }
 
     /**
-     * Cria o serviço de dados de mercado com todas as dependências.
+     * Serviço de dados de mercado que centraliza o recebimento de ticks,
+     * o histórico de candles e o gerenciamento de subscrições por símbolo.
+     *
+     * @param wsClient        cliente WebSocket primário
+     * @param requestSender   sender de requisições
+     * @param historyPaginator paginador de histórico de candles
+     * @param tickHeartbeat   monitor de chegada de ticks
+     * @param objectMapper    mapper compartilhado para desserialização de mensagens
+     * @return instância de {@link DerivMarketDataService}
      */
     @Bean
     public DerivMarketDataService derivMarketDataService(
