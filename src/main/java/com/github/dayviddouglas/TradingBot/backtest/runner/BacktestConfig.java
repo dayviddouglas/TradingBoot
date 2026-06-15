@@ -1,16 +1,21 @@
 package com.github.dayviddouglas.TradingBot.backtest.runner;
 
 /**
- * Configuração imutável de um backtest.
+ * Configuração imutável de uma execução de backtest.
  *
- * Centraliza os parâmetros que antes estavam dispersos como
- * constantes no BacktestRunner, facilitando ajustes sem
- * alterar a lógica de execução.
+ * Centraliza os parâmetros utilizados pelo {@link BacktestRunner} e pelo {@link SimpleBacktester},
+ * eliminando constantes dispersas e permitindo ajustes sem alterar a lógica de execução.
  *
- * @param dataDir         diretório com os arquivos de histórico
- * @param strategiesFile  caminho do strategies.json
- * @param profitPayout    payout fixo simulado para vitórias (ex: 0.95)
- * @param tradeDuration   duração padrão do trade em barras quando não configurado
+ * A instância {@link #DEFAULT} representa a configuração padrão utilizada pelo
+ * {@link BacktestRunner} quando executado de forma standalone.
+ *
+ * @param dataDir        diretório base contendo os arquivos de histórico de candles
+ *                       no formato {@code {symbol}_60.json}
+ * @param strategiesFile caminho do arquivo strategies.json com os profiles de configuração
+ * @param profitPayout   payout fixo simulado para trades vencedores; representa o retorno
+ *                       em R por unidade de stake (ex: {@code 0.70} = 70% de retorno)
+ * @param tradeDuration  duração padrão do trade em barras, utilizada quando o profile
+ *                       não possui {@code TradeConfig} configurado
  */
 public record BacktestConfig(
         String dataDir,
@@ -18,8 +23,11 @@ public record BacktestConfig(
         double profitPayout,
         int tradeDuration
 ) {
+
     /**
-     * Configuração padrão usada pelo BacktestRunner standalone.
+     * Configuração padrão utilizada pelo {@link BacktestRunner} standalone.
+     * Aponta para o diretório de histórico local, o strategies.json do projeto
+     * e utiliza payout de 70% com duração padrão de 15 barras.
      */
     public static final BacktestConfig DEFAULT = new BacktestConfig(
             "data/history",
@@ -29,9 +37,10 @@ public record BacktestConfig(
     );
 
     /**
-     * Verifica se o payout configurado é válido.
+     * Verifica se o payout configurado é um valor válido para simulação.
+     * Valores fora do intervalo {@code (0.0, 1.0]} indicam configuração incorreta.
      *
-     * @return true se profitPayout está entre 0 e 1
+     * @return {@code true} se {@code profitPayout} estiver entre 0 (exclusivo) e 1 (inclusivo)
      */
     public boolean hasValidPayout() {
         return profitPayout > 0.0 && profitPayout <= 1.0;

@@ -3,31 +3,37 @@ package com.github.dayviddouglas.TradingBot.backtest.result;
 import java.util.List;
 
 /**
- * Relatório completo de backtest com todas as métricas estatísticas.
+ * Relatório imutável com todas as métricas estatísticas de um backtest.
  *
- * Gerado pelo SimpleBacktester ao final da simulação.
- * Imutável após criação (record).
+ * Produzido pelo {@link BacktestMetricsCalculator} a partir dos resultados
+ * simulados pelo {@code SimpleBacktester}. A classificação de edge é calculada
+ * combinando múltiplos critérios para evitar falsos positivos com amostras pequenas.
  *
- * Classificação de edge:
- * - APPROVED:  >= 30 trades, winRate > 52%, expectancy > 0.05, profitFactor > 1.1
- * - WEAK:      >= 30 trades, expectancy positiva mas abaixo do threshold
- * - REJECTED:  >= 30 trades, expectancy negativa ou zero
- * - NO_DATA:   menos de 30 trades (amostra insuficiente)
+ * Critérios de classificação:
+ * <ul>
+ *   <li>{@code APPROVED}: {@code totalTrades >= 30}, {@code winRate > 52%},
+ *       {@code expectancy > 0.05} e {@code profitFactor > 1.1} — edge estatístico confirmado</li>
+ *   <li>{@code WEAK}: {@code totalTrades >= 30} e {@code expectancy > 0.0} —
+ *       expectância positiva mas abaixo dos limiares de aprovação</li>
+ *   <li>{@code REJECTED}: {@code totalTrades >= 30} e {@code expectancy <= 0.0} —
+ *       sem edge identificado</li>
+ *   <li>{@code NO_DATA}: {@code totalTrades < 30} — amostra insuficiente para conclusão</li>
+ * </ul>
  *
  * @param symbol               símbolo ou identificador do backtest
  * @param totalTrades          quantidade total de trades simulados
  * @param wins                 quantidade de trades vencedores
  * @param losses               quantidade de trades perdedores
  * @param winRate              taxa de acerto em percentual
- * @param totalPnl             lucro/prejuízo total acumulado
- * @param avgWin               ganho médio por trade vencedor
- * @param avgLoss              perda média por trade perdedor
- * @param payoffRatio          razão avgWin / avgLoss
+ * @param totalPnl             lucro/prejuízo total acumulado em R
+ * @param avgWin               ganho médio por trade vencedor em R
+ * @param avgLoss              perda média por trade perdedor em R (valor absoluto)
+ * @param payoffRatio          razão {@code avgWin / avgLoss}
  * @param expectancy           expectância por trade em R
- * @param profitFactor         razão grossProfit / grossLoss
- * @param maxDrawdown          máximo drawdown da equity curve
+ * @param profitFactor         razão {@code grossProfit / grossLoss}
+ * @param maxDrawdown          máximo drawdown da equity curve em R
  * @param maxConsecutiveLosses maior sequência de perdas consecutivas
- * @param results              lista de resultados individuais
+ * @param results              lista de resultados individuais dos trades simulados
  */
 public record BacktestReport(
         String symbol,
@@ -45,11 +51,13 @@ public record BacktestReport(
         int maxConsecutiveLosses,
         List<TradeResult> results
 ) {
+
     /**
-     * Cria relatório vazio para casos sem dados suficientes.
+     * Cria um relatório vazio para casos sem trades simulados.
+     * Todos os campos numéricos são zerados e a lista de resultados é vazia.
      *
-     * @param symbol símbolo do ativo
-     * @return relatório com todos os valores zerados
+     * @param symbol símbolo ou identificador do backtest
+     * @return relatório vazio com classificação {@code NO_DATA}
      */
     public static BacktestReport empty(String symbol) {
         return new BacktestReport(
@@ -60,15 +68,11 @@ public record BacktestReport(
     }
 
     /**
-     * Verifica se o backtest apresenta edge estatístico real.
+     * Verifica se o backtest apresenta edge estatístico real, combinando
+     * amostra mínima, taxa de acerto, expectância positiva significativa
+     * e profit factor acima de 1.1.
      *
-     * Critérios combinados para evitar falsos positivos:
-     * - Amostra mínima de 30 trades
-     * - Win rate acima de 52%
-     * - Expectância positiva significativa
-     * - Profit factor acima de 1.1
-     *
-     * @return true se o sistema apresenta edge
+     * @return {@code true} se todos os critérios de edge forem satisfeitos
      */
     public boolean hasEdge() {
         return totalTrades >= 30
@@ -78,21 +82,22 @@ public record BacktestReport(
     }
 
     /**
-     * Classifica o resultado do backtest em categorias operacionais.
+     * Classifica o resultado do backtest em uma das categorias operacionais
+     * com base na amostra disponível e nos critérios de edge.
      *
-     * @return classificação: APPROVED, WEAK, REJECTED ou NO_DATA
+     * @return {@code "APPROVED"}, {@code "WEAK"}, {@code "REJECTED"} ou {@code "NO_DATA"}
      */
     public String classification() {
         if (totalTrades < 30) return "NO_DATA";
-        if (hasEdge()) return "APPROVED";
+        if (hasEdge())        return "APPROVED";
         if (expectancy > 0.0) return "WEAK";
         return "REJECTED";
     }
 
     /**
-     * Formata o relatório completo para exibição no console.
+     * Formata o relatório completo em bloco de texto estruturado para exibição no console.
      *
-     * @return string formatada com todas as métricas
+     * @return string formatada com todas as métricas e a classificação final
      */
     public String toPrettyReport() {
         return """

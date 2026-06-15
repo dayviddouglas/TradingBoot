@@ -20,20 +20,23 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Runner de backtest alinhado ao runtime.
+ * Orquestra a execução do backtest para todos os profiles configurados no strategies.json.
  *
- * Responsabilidade única: orquestrar a execução do backtest
- * para todos os profiles do strategies.json.
+ * Para cada profile, carrega o histórico de candles do diretório configurado em
+ * {@link BacktestConfig}, constrói as estratégias habilitadas via {@link StrategiesConfigLoader}
+ * e delega a simulação ao {@link SimpleBacktester}. O {@link DecisionMode} de cada profile
+ * é respeitado, garantindo consistência entre runtime e backtest.
  *
- * Após refatoração, delega para:
- * - StrategiesConfigLoader    → carrega profiles e constrói estratégias
- * - SimpleBacktester          → simula trades por profile
- * - BacktestMetricsCalculator → calcula métricas (via SimpleBacktester)
- * - BacktestReportPrinter     → imprime relatórios no console
- * - BacktestConfig            → centraliza configuração
+ * No modo {@link DecisionMode#SINGLE_STRATEGY}, cada estratégia habilitada gera um
+ * {@link SimpleBacktester} e um {@link BacktestReport} independentes, permitindo
+ * comparação isolada do edge de cada estratégia.
  *
- * O decisionMode de cada profile controla o modo do backtest,
- * garantindo consistência entre runtime e backtest.
+ * Nos modos {@link DecisionMode#VOTING} e {@link DecisionMode#CONFLUENCE}, todas as
+ * estratégias habilitadas são avaliadas em conjunto por um único {@link SimpleBacktester}.
+ *
+ * Ao final, os relatórios são impressos via {@link BacktestReportPrinter}.
+ * A ferramenta é executada diretamente via {@link #main(String[])},
+ * independente do contexto Spring.
  */
 public class BacktestRunner {
 
@@ -42,6 +45,7 @@ public class BacktestRunner {
 
     /**
      * Ponto de entrada standalone do backtest.
+     * Executa todos os profiles com a configuração padrão {@link BacktestConfig#DEFAULT}.
      */
     public static void main(String[] args) {
         BacktestRunner runner = new BacktestRunner();
@@ -54,8 +58,11 @@ public class BacktestRunner {
 
     /**
      * Executa o backtest para todos os profiles do strategies.json.
+     * Carrega os profiles via {@link StrategiesConfigLoader}, executa cada um
+     * e imprime o relatório consolidado no console ao final.
      *
-     * @param config configuração do backtest
+     * @param config configuração do backtest com caminhos, payout e duração
+     * @throws Exception se ocorrer falha no carregamento dos profiles ou do histórico
      */
     public void runAll(BacktestConfig config) throws Exception {
         StrategiesConfigLoader loader = new StrategiesConfigLoader(
@@ -81,6 +88,15 @@ public class BacktestRunner {
     // Execução por profile
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Itera sobre todos os profiles, executa o backtest de cada um e acumula os relatórios.
+     * Cada relatório individual também é impresso no console imediatamente após a execução.
+     *
+     * @param loader   loader que constrói estratégias a partir do profile
+     * @param config   configuração do backtest
+     * @param profiles lista de profiles carregados do strategies.json
+     * @return lista consolidada de todos os relatórios gerados
+     */
     private List<BacktestReport> runAllProfiles(
             StrategiesConfigLoader loader,
             BacktestConfig config,
@@ -89,8 +105,7 @@ public class BacktestRunner {
         List<BacktestReport> reports = new ArrayList<>();
 
         for (StrategiesProfile profile : profiles) {
-            List<BacktestReport> profileReports =
-                    runProfile(loader, config, profile);
+            List<BacktestReport> profileReports = runProfile(loader, config, profile);
             reports.addAll(profileReports);
             profileReports.forEach(r -> System.out.println(r.toPrettyReport()));
         }
@@ -98,6 +113,17 @@ public class BacktestRunner {
         return reports;
     }
 
+    /**
+     * Executa o backtest de um único profile.
+     * Carrega o histórico de candles, constrói as estratégias habilitadas e
+     * cria os {@link SimpleBacktester} conforme o {@link DecisionMode} do profile.
+     * Retorna lista vazia quando o histórico ou as estratégias não estiverem disponíveis.
+     *
+     * @param loader  loader que constrói as estratégias a partir do profile
+     * @param config  configuração do backtest
+     * @param profile profile do ativo a ser testado
+     * @return lista de relatórios gerados para este profile
+     */
     private List<BacktestReport> runProfile(
             StrategiesConfigLoader loader,
             BacktestConfig config,
@@ -124,21 +150,33 @@ public class BacktestRunner {
         return buildAndRunBacktesters(config, profile, strategies, bars);
     }
 
+    /**
+     * Cria e executa os {@link SimpleBacktester} para o profile informado.
+     * No modo {@link DecisionMode#SINGLE_STRATEGY}, cria um backtester por estratégia habilitada.
+     * Nos demais modos, cria um único backtester com todas as estratégias.
+     *
+     * @param config     configuração do backtest com payout e duração padrão
+     * @param profile    profile do ativo com o {@link DecisionMode} e parâmetros do engine
+     * @param strategies estratégias habilitadas para este profile
+     * @param bars       histórico de candles carregado
+     * @return lista de relatórios gerados
+     */
     private List<BacktestReport> buildAndRunBacktesters(
             BacktestConfig config,
             StrategiesProfile profile,
             List<TradingStrategy> strategies,
             List<Bar> bars
     ) {
-        DecisionMode mode = profile.getDecisionMode();
-        int maxBars = profile.getMaxBars();
-        int duration = resolveDuration(config, profile);
+        DecisionMode mode     = profile.getDecisionMode();
+        int          maxBars  = profile.getMaxBars();
+        int          duration = resolveDuration(config, profile);
 
         List<BacktestReport> reports = new ArrayList<>();
 
         if (mode == DecisionMode.SINGLE_STRATEGY) {
+            // Cria um backtester isolado por estratégia para comparação individual
             for (TradingStrategy strategy : strategies) {
-                String backtestId = profile.getSymbol() + " [" + strategy.name() + "]";
+                String          backtestId = profile.getSymbol() + " [" + strategy.name() + "]";
                 SimpleBacktester backtester = new SimpleBacktester(
                         backtestId, List.of(strategy),
                         maxBars, config.profitPayout(),
@@ -146,6 +184,7 @@ public class BacktestRunner {
                 reports.add(backtester.run(bars));
             }
         } else {
+            // VOTING e CONFLUENCE avaliam todas as estratégias em conjunto
             SimpleBacktester backtester = new SimpleBacktester(
                     profile.getSymbol(), strategies,
                     maxBars, config.profitPayout(),
@@ -160,6 +199,15 @@ public class BacktestRunner {
     // Carregamento de histórico
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Carrega o histórico de candles do arquivo JSON correspondente ao símbolo.
+     * O arquivo é esperado no formato {@code {dataDir}/{symbol}_60.json}.
+     * Retorna lista vazia quando o arquivo não existir ou ocorrer falha na leitura.
+     *
+     * @param dataDir diretório base dos arquivos de histórico
+     * @param symbol  símbolo do ativo
+     * @return lista de candles ordenada cronologicamente ou lista vazia
+     */
     private List<Bar> loadBars(String dataDir, String symbol) {
         Path file = Paths.get(dataDir, symbol + "_60.json");
 
@@ -178,8 +226,17 @@ public class BacktestRunner {
         }
     }
 
+    /**
+     * Lê e parseia o arquivo JSON de histórico extraindo o array {@code candles}.
+     * Candles com campos inválidos são silenciosamente descartados.
+     * O resultado é ordenado cronologicamente por timestamp.
+     *
+     * @param file caminho do arquivo JSON de histórico
+     * @return lista de {@link Bar} válidos ordenada cronologicamente
+     * @throws Exception se ocorrer falha na leitura ou deserialização do JSON
+     */
     private List<Bar> parseBars(Path file) throws Exception {
-        JsonNode root = mapper.readTree(Files.readString(file));
+        JsonNode root        = mapper.readTree(Files.readString(file));
         JsonNode candlesNode = root.path("candles");
 
         if (!candlesNode.isArray()) {
@@ -197,11 +254,20 @@ public class BacktestRunner {
         return bars;
     }
 
+    /**
+     * Converte um nó JSON individual em um {@link Bar}.
+     * Retorna {@code null} quando o epoch for inválido ou qualquer campo OHLC
+     * não for um número finito, descartando silenciosamente o candle corrompido.
+     * O volume é sempre {@code 0.0} pois a API Deriv não fornece volume real.
+     *
+     * @param node nó JSON representando um candle
+     * @return {@link Bar} construído ou {@code null} se os dados forem inválidos
+     */
     private Bar parseBar(JsonNode node) {
-        long epoch = node.path("epoch").asLong(0);
-        double open = node.path("open").asDouble(Double.NaN);
-        double high = node.path("high").asDouble(Double.NaN);
-        double low = node.path("low").asDouble(Double.NaN);
+        long   epoch = node.path("epoch").asLong(0);
+        double open  = node.path("open").asDouble(Double.NaN);
+        double high  = node.path("high").asDouble(Double.NaN);
+        double low   = node.path("low").asDouble(Double.NaN);
         double close = node.path("close").asDouble(Double.NaN);
 
         if (epoch <= 0 || !Double.isFinite(open) || !Double.isFinite(high)
@@ -216,6 +282,15 @@ public class BacktestRunner {
     // Utilitários
     // ═══════════════════════════════════════════════════════════════
 
+    /**
+     * Resolve a duração do contrato para o backtest.
+     * Prioriza o valor configurado no {@code TradeConfig} do profile;
+     * utiliza o valor padrão do {@link BacktestConfig} quando o trade config não estiver disponível.
+     *
+     * @param config  configuração do backtest com duração padrão
+     * @param profile profile do ativo com configuração de trade opcional
+     * @return duração em candles a ser utilizada na simulação
+     */
     private int resolveDuration(BacktestConfig config, StrategiesProfile profile) {
         return profile.getTrade() != null
                 ? profile.getTrade().getDuration()

@@ -1,18 +1,20 @@
 package com.github.dayviddouglas.TradingBot.backtest.result;
 
 /**
- * Resultado imutável de uma operação simulada no backtest.
+ * Resultado imutável de uma operação simulada pelo {@code SimpleBacktester} sobre dados históricos.
  *
- * Representa o resultado de uma entrada e saída do mercado
- * simulada pelo SimpleBacktester sobre dados históricos.
+ * Representa o desfecho de uma entrada e saída do mercado simulada:
+ * o sinal de entrada, os preços de entrada e saída e o PnL resultante.
+ * O PnL é positivo ({@code profitPayout}) em trades vencedores e negativo ({@code -1.0})
+ * em trades perdedores, refletindo a estrutura de payout fixo do produto binário simulado.
  *
- * @param timestamp    horário de entrada no formato ISO
- * @param strategyName nome da estratégia que gerou o sinal
- * @param signalType   tipo do sinal (BUY ou SELL)
- * @param entryPrice   preço de entrada (close do candle de sinal)
- * @param exitPrice    preço de saída (close N barras à frente)
- * @param won          true se o trade foi vencedor
- * @param pnl          lucro ou prejuízo (+profitPayout para WIN, -1.0 para LOSS)
+ * @param timestamp    horário de entrada no formato ISO, extraído do candle de sinal
+ * @param strategyName nome da estratégia que gerou o sinal de entrada
+ * @param signalType   tipo do sinal: {@code "BUY"} ou {@code "SELL"}
+ * @param entryPrice   preço de fechamento do candle no momento do sinal
+ * @param exitPrice    preço de fechamento do candle de saída, N barras à frente
+ * @param won          {@code true} se o trade resultou em vitória
+ * @param pnl          lucro ({@code +profitPayout}) ou prejuízo ({@code -1.0})
  */
 public record TradeResult(
         String timestamp,
@@ -23,20 +25,22 @@ public record TradeResult(
         boolean won,
         double pnl
 ) {
+
     /**
      * Verifica se o resultado representa uma perda.
      *
-     * @return true se o trade foi perdedor
+     * @return {@code true} se o trade foi perdedor
      */
     public boolean lost() {
         return !won;
     }
 
     /**
-     * Retorna o valor absoluto do pnl.
-     * Útil para cálculo de avgLoss sem negação explícita.
+     * Retorna o valor absoluto do PnL.
+     * Utilizado pelo {@link BacktestMetricsCalculator} para calcular
+     * {@code avgLoss} e {@code grossLoss} sem negação explícita.
      *
-     * @return |pnl|
+     * @return {@code |pnl|}
      */
     public double absolutePnl() {
         return Math.abs(pnl);
