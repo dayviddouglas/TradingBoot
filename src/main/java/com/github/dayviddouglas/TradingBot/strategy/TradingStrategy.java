@@ -6,114 +6,80 @@ import com.github.dayviddouglas.TradingBot.model.Signal;
 import java.util.List;
 
 /**
- * Interface base para todas as estratégias de trading do sistema.
+ * Contrato que todas as estratégias de trading do sistema devem implementar
+ * para participar do pipeline de decisão do
+ * {@link com.github.dayviddouglas.TradingBot.engine.core.StrategyEngine}.
  *
- * Toda estratégia que quiser participar do pipeline de decisão
- * (StrategyEngine) deve implementar esta interface.
+ * Cada implementação encapsula uma lógica de análise técnica distinta, permitindo
+ * que o engine execute qualquer combinação de estratégias de forma polimórfica,
+ * sem conhecer os detalhes de cada uma. O modo de decisão ({@code SINGLE_STRATEGY},
+ * {@code VOTING} ou {@code CONFLUENCE}) determina como os sinais individuais
+ * são combinados para produzir o sinal final.
  *
- * O contrato é simples e intencional:
- * - name(): identifica a estratégia para logs, metadata, pesos e relatórios
- * - checkSignal(): avalia os candles e retorna um sinal (BUY, SELL ou NONE)
+ * Para adicionar uma nova estratégia ao sistema:
+ * <ol>
+ *   <li>Implementar esta interface</li>
+ *   <li>Adicionar o método {@code buildXxx()} no
+ *       {@link com.github.dayviddouglas.TradingBot.config.strategy.StrategyBuilder}</li>
+ *   <li>Adicionar bloco correspondente no strategies.json</li>
+ *   <li>Registrar a chave no
+ *       {@link com.github.dayviddouglas.TradingBot.engine.confluence.StrategyWeightProfile}
+ *       para os três regimes</li>
+ * </ol>
  *
- * Padrão arquitetural: Strategy Pattern
- * Cada implementação encapsula uma lógica de análise técnica diferente,
- * permitindo que o StrategyEngine execute qualquer combinação de
- * estratégias de forma polimórfica, sem conhecer os detalhes de cada uma.
+ * <b>Contrato de {@link #name()}</b>:
+ * O valor retornado deve corresponder exatamente às chaves utilizadas no
+ * {@link com.github.dayviddouglas.TradingBot.engine.confluence.StrategyWeightProfile}
+ * e nos conjuntos do {@link com.github.dayviddouglas.TradingBot.risk.AtrRiskManager}.
+ * Divergência resulta em fallback silencioso para peso {@code 1.0} ou classificação
+ * incorreta de confluência.
  *
- * Integração com o sistema:
- * 1. Implementar esta interface
- * 2. Adicionar builder no StrategiesConfigLoader
- * 3. Adicionar bloco no strategies.json
- * → A estratégia passa a funcionar em runtime e backtest automaticamente
+ * <b>Contrato de {@link #checkSignal(List)}</b>:
+ * <ul>
+ *   <li>Nunca retornar {@code null} — usar {@code Signal.none(name())}</li>
+ *   <li>Ser determinístico: mesma entrada produz sempre o mesmo resultado</li>
+ *   <li>Não manter estado mutável entre chamadas</li>
+ *   <li>Validar {@code null} e tamanho mínimo dos candles antes de processar</li>
+ *   <li>Não modificar a lista de candles recebida</li>
+ * </ul>
  *
  * Implementações existentes:
- * - BollingerMeanReversionStrategy (reversão à média via Bollinger)
- * - ZScoreMeanReversionStrategy (reversão via desvio estatístico)
- * - EmaRsiStrategy (tendência via EMA + RSI)
- * - BreakoutStrategy (rompimento simples de níveis)
- * - DonchianBreakoutStrategy (breakout Turtle Traders)
- * - KeltnerChannelStrategy (breakout via canal ATR)
- * - PinBarStrategy (rejeição via padrão de vela)
- * - SupportResistanceStrategy (rejeição em níveis com múltiplos toques)
- *
- * ⚠️ Pontos importantes para implementadores:
- *
- * 1. O retorno de name() DEVE bater com:
- *    - As chaves no StrategyWeightProfile (para ponderação por regime)
- *    - As chaves no AtrRiskManager (para classificação de confluência)
- *    - O nome usado no StrategiesConfigLoader (para construção)
- *    Inconsistência de nomes causa fallback silencioso para peso 1.0 ou
- *    classificação incorreta de confluência.
- *
- * 2. checkSignal() DEVE:
- *    - Retornar Signal.none(name()) quando não há sinal (nunca null)
- *    - Ser puro/determinístico: mesma entrada → mesma saída
- *    - Não manter estado interno entre chamadas
- *    - Validar null e tamanho mínimo dos bars antes de processar
- *    - Incluir metadata no Signal para rastreabilidade
- *
- * 3. Thread-safety:
- *    - checkSignal() pode ser chamado de threads diferentes
- *    - Implementações não devem manter estado mutável entre chamadas
- *    - O uso de List<Bar> como entrada (não array) facilita operações imutáveis
- *
- * 4. Performance:
- *    - checkSignal() roda na thread do WebSocket reader (via StrategyEngine)
- *    - Cálculos pesados podem atrasar o recebimento de novos ticks
- *    - Para estratégias complexas, considere pré-cálculo ou cache de indicadores
- *
- * 💡 Sugestão: Em evolução futura, considere adicionar:
- * - default String family(): para classificar automaticamente como
- *   "REVERSAL" ou "TREND_BREAKOUT" sem depender de Sets externos
- * - default int minBarsRequired(): para que o engine saiba antecipadamente
- *   quantas barras cada estratégia precisa, evitando chamadas desnecessárias
+ * <ul>
+ *   <li>{@link BollingerMeanReversionStrategy} — reversão via Bandas de Bollinger com RSI</li>
+ *   <li>{@link ZScoreMeanReversionStrategy} — reversão via desvio padrão populacional</li>
+ *   <li>{@link EmaRsiStrategy} — tendência via cruzamento de EMAs com RSI</li>
+ *   <li>{@link BreakoutStrategy} — rompimento de máximas e mínimas históricas</li>
+ *   <li>{@link DonchianBreakoutStrategy} — breakout via Canal de Donchian</li>
+ *   <li>{@link KeltnerChannelStrategy} — breakout via Canal de Keltner</li>
+ *   <li>{@link PinBarStrategy} — rejeição via padrão de vela próxima a S/R</li>
+ *   <li>{@link SupportResistanceStrategy} — rejeição em níveis com múltiplos toques</li>
+ * </ul>
  */
 public interface TradingStrategy {
 
     /**
-     * Retorna o nome identificador da estratégia.
+     * Retorna o identificador único da estratégia.
      *
-     * Este nome é usado em:
-     * - Logs operacionais (FINAL SIGNAL | strategy=...)
-     * - Metadata do Signal (decisionStrategies)
-     * - StrategyWeightProfile (peso por regime)
-     * - AtrRiskManager (classificação TREND vs REVERSAL)
-     * - TradeReportService (relatório operacional)
-     * - BacktestReport (identificação nos resultados)
+     * Utilizado em logs operacionais, metadata do {@link Signal},
+     * {@link com.github.dayviddouglas.TradingBot.engine.confluence.StrategyWeightProfile}
+     * (ponderação por regime), {@link com.github.dayviddouglas.TradingBot.risk.AtrRiskManager}
+     * (classificação TREND vs REVERSAL), relatórios operacionais e resultados de backtest.
      *
-     * ⚠️ CRÍTICO: O nome retornado deve ser EXATAMENTE o mesmo usado
-     * como chave nos mapas de StrategyWeightProfile e nos Sets do
-     * AtrRiskManager. Qualquer divergência causa comportamento incorreto
-     * silencioso (peso default 1.0 ou classificação errada).
-     *
-     * @return nome único da estratégia (ex: "BollingerMeanReversion")
+     * @return nome único da estratégia (ex: {@code "BollingerMeanReversionStrategy"})
      */
     String name();
 
     /**
-     * Avalia os candles e retorna um sinal de trading.
+     * Avalia a lista de candles e retorna o sinal operacional identificado.
      *
-     * Contrato:
-     * - bars estão em ordem cronológica ASCENDENTE
-     * - bars.get(bars.size()-1) é o candle mais recente
-     * - bars.get(0) é o candle mais antigo na janela
-     * - O método NUNCA deve retornar null (use Signal.none(name()))
-     * - O método deve validar bars != null e tamanho mínimo
-     * - O método deve ser determinístico (sem randomização)
-     * - O método não deve modificar a lista bars
+     * Os candles estão em ordem cronológica ascendente: {@code bars.get(0)} é o mais antigo
+     * e {@code bars.get(bars.size()-1)} é o mais recente. O método nunca deve modificar a lista.
      *
-     * O Signal retornado pode ser:
-     * - Signal.buy(...): oportunidade de compra identificada
-     * - Signal.sell(...): oportunidade de venda identificada
-     * - Signal.none(name()): sem oportunidade clara
-     *
-     * O StrategyEngine decide o que fazer com o sinal baseado no
-     * DecisionMode configurado (SINGLE, VOTING ou CONFLUENCE).
-     *
-     * @param bars lista de candles em ordem cronológica ascendente.
-     *             O último elemento é o candle mais recente.
-     *             Pode ser null (deve retornar NONE).
-     * @return Signal com tipo (BUY/SELL/NONE), timestamp, preço e metadata
+     * @param bars lista de candles em ordem cronológica ascendente;
+     *             pode ser {@code null} (deve retornar {@code NONE})
+     * @return {@link Signal} com tipo ({@code BUY}, {@code SELL} ou {@code NONE}),
+     *         timestamp e preço do candle mais recente, e metadata dos indicadores;
+     *         nunca {@code null}
      */
     Signal checkSignal(List<Bar> bars);
 }

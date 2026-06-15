@@ -9,85 +9,44 @@ import java.util.Map;
 /**
  * Estratégia de reversão à média baseada em Z-Score estatístico.
  *
- * Implementa TradingStrategy para uso pelo StrategyEngine.
+ * O Z-Score mede quantos desvios padrão o preço atual está distante da média
+ * dos últimos {@code period} candles: {@code zScore = (close - mean) / stdDev}.
+ * Quando o desvio é extremo, a probabilidade de retorno à média aumenta:
+ * <ul>
+ *   <li>{@code BUY}: {@code zScore <= -entryZScore} — preço muito abaixo da média (oversold estatístico)</li>
+ *   <li>{@code SELL}: {@code zScore >= +entryZScore} — preço muito acima da média (overbought estatístico)</li>
+ * </ul>
  *
- * Conceito:
- * O Z-Score mede quantos desvios padrão o preço atual está distante
- * da média recente. Quando o desvio é extremo (preço "longe demais"),
- * a probabilidade de reversão à média aumenta.
+ * Em distribuição normal, ~95.4% dos dados estão dentro de ±2 desvios e ~99.7% dentro de ±3,
+ * tornando o Z-Score um critério parametrizável de extremidade estatística.
  *
- * Fórmula:
- *   zScore = (close - mean) / stdDev
+ * Diferencia-se da {@link BollingerMeanReversionStrategy} por medir diretamente o desvio
+ * normalizado em vez de usar bandas visuais, sendo mais explicitamente estatístico com apenas
+ * dois parâmetros de calibração. Ambas pertencem à mesma família de reversão à média e são
+ * altamente correlacionadas.
  *
- * Interpretação:
- * - zScore = 0: preço está exatamente na média
- * - zScore = +2: preço está 2 desvios acima da média (estatisticamente raro)
- * - zScore = -2: preço está 2 desvios abaixo da média (estatisticamente raro)
- *
- * Em distribuição normal:
- * - ~95.4% dos dados estão dentro de ±2 desvios
- * - ~99.7% dos dados estão dentro de ±3 desvios
- *
- * Lógica operacional:
- * - BUY quando zScore <= -entryZScore (preço muito abaixo da média)
- * - SELL quando zScore >= +entryZScore (preço muito acima da média)
- *
- * Motivação para criação:
- * A família de reversão foi a única com pista real de edge no projeto.
- * O Z-Score foi adicionado para complementar a BollingerMeanReversion
- * com uma abordagem mais explicitamente estatística e parametrizável.
- *
- * Diferença em relação ao Bollinger:
- * - Bollinger usa bandas visuais e posição relativa dentro delas
- * - ZScore mede diretamente o desvio estatístico normalizado
- * - ZScore é mais fácil de calibrar (apenas 2 parâmetros)
- * - Ambas são da mesma família (mean reversion), portanto altamente correlacionadas
- *
- * Classificada como REVERSAL_RANGE pelo projeto.
- * Recebe peso alto em RANGING no StrategyWeightProfile.
- *
- * ⚠️ Ponto de atenção: O desvio padrão usado aqui é POPULACIONAL (N),
- * diferente da BollingerMeanReversionStrategy que usa AMOSTRAL (N-1).
- * Para períodos pequenos (< 20), essa diferença pode ser significativa.
- * Considere padronizar para N-1 por consistência.
- *
- * ⚠️ Ponto de atenção: O name() retorna "ZScoreMeanReversion" (sem sufixo),
- * enquanto o Bollinger retorna "BollingerMeanReversionStrategy" (com sufixo).
- * Essa inconsistência pode causar problemas no StrategyWeightProfile e
- * no AtrRiskManager, onde os nomes precisam bater exatamente.
- *
- * Referências:
- * - [Jegadeesh, 1990, Journal of Finance]
- * - [Lo & MacKinlay, 1990, Review of Financial Studies]
- *
- * @see BollingerMeanReversionStrategy para abordagem visual com bandas
+ * O desvio padrão utilizado é o populacional (divisor N), diferentemente da
+ * {@link BollingerMeanReversionStrategy} que usa o amostral (divisor N-1).
  */
 public class ZScoreMeanReversionStrategy implements TradingStrategy {
 
     /**
      * Período para cálculo da média e desvio padrão.
-     * Quanto maior, mais suave (menos sinais, mais confiáveis).
-     * Quanto menor, mais reativo (mais sinais, mais ruído).
-     * Valor típico: 20.
+     * Valores maiores produzem menos sinais e mais estáveis; valores menores são mais reativos.
      */
     private final int period;
 
     /**
-     * Z-Score mínimo para gerar sinal de entrada.
-     * Valor típico: 2.0 a 2.5.
-     * Valores maiores = sinais mais raros mas mais extremos.
-     *
-     * Com entryZScore = 2.2:
-     * - BUY quando preço está 2.2 desvios ABAIXO da média
-     * - SELL quando preço está 2.2 desvios ACIMA da média
+     * Z-Score mínimo (em módulo) para gerar sinal de entrada.
+     * Com {@code entryZScore = 2.2}: BUY quando o preço está 2.2 desvios abaixo da média;
+     * SELL quando está 2.2 desvios acima.
      */
     private final double entryZScore;
 
     /**
-     * Construtor com validação de parâmetros.
-     *
-     * @param period período para média e desvio padrão (mínimo 5)
-     * @param entryZScore threshold de Z-Score para entrada (deve ser > 0)
+     * @param period      período para cálculo da média e desvio padrão; mínimo 5
+     * @param entryZScore threshold de Z-Score para geração de sinal; deve ser positivo
+     * @throws IllegalArgumentException se os parâmetros forem inválidos
      */
     public ZScoreMeanReversionStrategy(int period, double entryZScore) {
         if (period < 5) {
@@ -97,16 +56,13 @@ public class ZScoreMeanReversionStrategy implements TradingStrategy {
             throw new IllegalArgumentException("entryZScore must be > 0");
         }
 
-        this.period = period;
+        this.period      = period;
         this.entryZScore = entryZScore;
     }
 
     /**
-     * Nome da estratégia para identificação.
-     *
-     * ⚠️ Retorna "ZScoreMeanReversion" sem o sufixo "Strategy",
-     * diferente de outras estratégias como "BollingerMeanReversionStrategy".
-     * Isso deve bater com as chaves no StrategyWeightProfile.
+     * Identificador da estratégia utilizado em logs, metadata do sinal
+     * e no {@link com.github.dayviddouglas.TradingBot.engine.confluence.StrategyWeightProfile}.
      */
     @Override
     public String name() {
@@ -114,21 +70,19 @@ public class ZScoreMeanReversionStrategy implements TradingStrategy {
     }
 
     /**
-     * Avalia se o preço está em desvio estatístico extremo.
+     * Avalia se o preço atual está em desvio estatístico extremo em relação à média recente.
      *
      * Fluxo:
-     * 1. Extrai a janela dos últimos N candles
-     * 2. Calcula média e desvio padrão dos closes
-     * 3. Calcula Z-Score: (close - mean) / stdDev
-     * 4. Se zScore <= -entryZScore → BUY (preço muito abaixo)
-     * 5. Se zScore >= +entryZScore → SELL (preço muito acima)
-     * 6. Caso contrário → NONE
+     * <ol>
+     *   <li>Extrai os últimos {@code period} candles como janela de análise</li>
+     *   <li>Calcula a média e o desvio padrão populacional dos fechamentos</li>
+     *   <li>Descarta quando o desvio padrão for zero (mercado completamente parado)</li>
+     *   <li>Calcula o Z-Score: {@code (close - mean) / stdDev}</li>
+     *   <li>Z-Score extremamente negativo → BUY; extremamente positivo → SELL</li>
+     * </ol>
      *
-     * O metadata usa Map.of() (imutável) porque os parâmetros são
-     * poucos e todos conhecidos no momento da criação.
-     *
-     * @param bars lista de candles para análise
-     * @return Signal (BUY, SELL ou NONE) com metadata incluindo zScore calculado
+     * @param bars lista de candles para análise; mínimo {@code period} candles
+     * @return {@link Signal} com tipo, timestamp, preço e metadata dos indicadores
      */
     @Override
     public Signal checkSignal(List<Bar> bars) {
@@ -136,70 +90,63 @@ public class ZScoreMeanReversionStrategy implements TradingStrategy {
             return Signal.none(name());
         }
 
-        // Extrai os últimos N candles como janela de análise
-        int from = bars.size() - period;
+        // Extrai a janela dos últimos N candles para cálculo das estatísticas
+        int      from   = bars.size() - period;
         List<Bar> window = bars.subList(from, bars.size());
 
-        // Calcula estatísticas descritivas
-        double mean = averageClose(window);
+        double mean   = averageClose(window);
         double stdDev = standardDeviationClose(window, mean);
 
-        // Validação: stdDev zero indica mercado completamente parado
+        // StdDev zero indica mercado sem variação — Z-Score seria indefinido
         if (!Double.isFinite(mean) || !Double.isFinite(stdDev) || stdDev <= 0.0) {
             return Signal.none(name());
         }
 
-        Bar last = bars.get(bars.size() - 1);
-        double close = last.close();
-
-        // ── Cálculo do Z-Score ──
-        // Quantos desvios padrão o preço está distante da média
+        Bar    last   = bars.get(bars.size() - 1);
+        double close  = last.close();
         double zScore = (close - mean) / stdDev;
 
-        // ── BUY: preço muito abaixo da média ──
-        // Z-Score negativo extremo indica oversold estatístico
-        // Expectativa: preço tende a retornar em direção à média
+        // BUY: preço muito abaixo da média — oversold estatístico
         if (zScore <= -entryZScore) {
             return Signal.buy(
                     name(),
                     last.timestamp(),
                     close,
                     Map.of(
-                            "mean", mean,
-                            "stdDev", stdDev,
-                            "zScore", zScore,
-                            "period", period,
+                            "mean",        mean,
+                            "stdDev",      stdDev,
+                            "zScore",      zScore,
+                            "period",      period,
                             "entryZScore", entryZScore
                     )
             );
         }
 
-        // ── SELL: preço muito acima da média ──
-        // Z-Score positivo extremo indica overbought estatístico
+        // SELL: preço muito acima da média — overbought estatístico
         if (zScore >= entryZScore) {
             return Signal.sell(
                     name(),
                     last.timestamp(),
                     close,
                     Map.of(
-                            "mean", mean,
-                            "stdDev", stdDev,
-                            "zScore", zScore,
-                            "period", period,
+                            "mean",        mean,
+                            "stdDev",      stdDev,
+                            "zScore",      zScore,
+                            "period",      period,
                             "entryZScore", entryZScore
                     )
             );
         }
 
-        // Preço dentro da faixa normal: sem sinal
+        // Preço dentro da faixa normal — sem sinal
         return Signal.none(name());
     }
 
     /**
-     * Calcula a média aritmética dos preços de fechamento.
+     * Calcula a média aritmética dos preços de fechamento da janela.
      *
-     * @param bars lista de candles da janela de análise
-     * @return média dos closes
+     * @param bars candles da janela de análise
+     * @return média dos fechamentos
      */
     private double averageClose(List<Bar> bars) {
         double sum = 0.0;
@@ -210,16 +157,12 @@ public class ZScoreMeanReversionStrategy implements TradingStrategy {
     }
 
     /**
-     * Calcula o desvio padrão POPULACIONAL dos preços de fechamento.
+     * Calcula o desvio padrão populacional (divisor N) dos preços de fechamento.
+     * Utiliza divisor N em vez de N-1 (amostral), o que pode produzir diferença
+     * significativa para períodos pequenos (abaixo de 20 candles).
      *
-     * Usa N (populacional) em vez de N-1 (amostral).
-     *
-     * ⚠️ Ponto de atenção: A BollingerMeanReversionStrategy usa N-1 (amostral).
-     * Para consistência, considere padronizar ambas para o mesmo método.
-     * A diferença é mais significativa para períodos pequenos (< 20).
-     *
-     * @param bars lista de candles da janela
-     * @param mean média pré-calculada
+     * @param bars  candles da janela de análise
+     * @param mean  média pré-calculada dos fechamentos
      * @return desvio padrão populacional
      */
     private double standardDeviationClose(List<Bar> bars, double mean) {
@@ -228,7 +171,7 @@ public class ZScoreMeanReversionStrategy implements TradingStrategy {
             double diff = bar.close() - mean;
             sumSq += diff * diff;
         }
-        // N (populacional) — considere usar N-1 para consistência com Bollinger
+        // Divisor N (populacional)
         return Math.sqrt(sumSq / bars.size());
     }
 }

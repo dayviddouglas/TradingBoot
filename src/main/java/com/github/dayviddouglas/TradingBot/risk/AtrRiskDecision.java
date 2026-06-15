@@ -1,19 +1,24 @@
 package com.github.dayviddouglas.TradingBot.risk;
 
 /**
- * Record que representa a decisão de risco do ATR.
+ * Resultado imutável da avaliação de risco realizada pelo {@link AtrRiskManager}.
  *
- * Contém todas as informações sobre a avaliação de volatilidade
- * e a decisão tomada pelo AtrRiskManager.
+ * Encapsula a decisão de permitir ou bloquear um trade com base na volatilidade
+ * atual do ativo medida pelo ATR, incluindo os valores calculados e o motivo
+ * legível da decisão.
  *
- * @param allowTrade Se o trade deve ser executado
- * @param adjustedAmount Valor ajustado da stake (pode ser reduzido ou zero se bloqueado)
- * @param riskMode Modo de risco aplicado: ALLOW, REDUCE_STAKE, BLOCK, INSUFFICIENT_DATA, NO_STRATEGIES, ZERO_BASELINE
- * @param atrFast ATR de curto prazo (14 períodos)
- * @param atrBaseline ATR de longo prazo baseline (50 períodos)
- * @param atrRatio Razão entre ATR fast e baseline (atrFast / atrBaseline)
- * @param confluenceType Tipo da confluência que gerou o sinal: TREND_BREAKOUT, REVERSAL_RANGE ou UNKNOWN
- * @param reason Razão da decisão em texto legível
+ * @param allowTrade      {@code true} se o trade pode ser executado
+ * @param adjustedAmount  stake a ser utilizado; pode ser reduzido ou zero quando bloqueado
+ * @param riskMode        modo de risco aplicado: {@code ALLOW}, {@code REDUCE_STAKE},
+ *                        {@code BLOCK}, {@code INSUFFICIENT_DATA}, {@code NO_STRATEGIES}
+ *                        ou {@code ZERO_BASELINE}
+ * @param atrFast         ATR de curto prazo calculado sobre 14 períodos
+ * @param atrBaseline     ATR de referência calculado sobre 50 períodos
+ * @param atrRatio        razão {@code atrFast / atrBaseline}; mede a intensidade relativa
+ *                        da volatilidade atual em relação à histórica
+ * @param confluenceType  tipo de confluência que gerou o sinal:
+ *                        {@code TREND_BREAKOUT}, {@code REVERSAL_RANGE} ou {@code UNKNOWN}
+ * @param reason          descrição legível do motivo da decisão, utilizada nos logs operacionais
  */
 public record AtrRiskDecision(
         boolean allowTrade,
@@ -27,47 +32,50 @@ public record AtrRiskDecision(
 ) {
 
     /**
-     * Valida se a decisão permite execução do trade.
+     * Verifica se a decisão autoriza a execução do trade com stake válido.
      *
-     * @return true se allowTrade é true e adjustedAmount é maior que zero
+     * @return {@code true} se {@code allowTrade} for {@code true}
+     *         e {@code adjustedAmount} for maior que zero
      */
     public boolean canExecute() {
         return allowTrade && adjustedAmount > 0;
     }
 
     /**
-     * Verifica se a stake foi reduzida.
+     * Verifica se o stake foi reduzido pelo gerenciador de risco.
      *
-     * @return true se o riskMode for REDUCE_STAKE
+     * @return {@code true} se o {@code riskMode} for {@code "REDUCE_STAKE"}
      */
     public boolean isStakeReduced() {
         return "REDUCE_STAKE".equals(riskMode);
     }
 
     /**
-     * Verifica se o trade foi bloqueado.
+     * Verifica se o trade foi bloqueado pelo gerenciador de risco.
      *
-     * @return true se o riskMode for BLOCK
+     * @return {@code true} se o {@code riskMode} for {@code "BLOCK"}
      */
     public boolean isBlocked() {
         return "BLOCK".equals(riskMode);
     }
 
     /**
-     * Verifica se a decisão foi tomada com dados insuficientes.
+     * Verifica se a decisão foi tomada com dados insuficientes para avaliação completa.
+     * Cobre os casos em que o histórico é curto demais, não há estratégias ou o ATR
+     * baseline é zero, impossibilitando o cálculo do ratio.
      *
-     * @return true se o riskMode indicar falta de dados
+     * @return {@code true} se o {@code riskMode} indicar ausência de dados suficientes
      */
     public boolean hasInsufficientData() {
-        return "INSUFFICIENT_DATA".equals(riskMode) ||
-                "NO_STRATEGIES".equals(riskMode) ||
-                "ZERO_BASELINE".equals(riskMode);
+        return "INSUFFICIENT_DATA".equals(riskMode)
+                || "NO_STRATEGIES".equals(riskMode)
+                || "ZERO_BASELINE".equals(riskMode);
     }
 
     /**
-     * Retorna descrição formatada da decisão para logs.
+     * Formata os campos principais da decisão em string compacta para uso nos logs operacionais.
      *
-     * @return String com resumo da decisão
+     * @return string com modo, autorização, stake, tipo de confluência, ATR ratio e motivo
      */
     public String toLogString() {
         return String.format(

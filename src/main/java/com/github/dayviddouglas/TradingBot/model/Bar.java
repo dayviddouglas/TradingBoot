@@ -3,11 +3,20 @@ package com.github.dayviddouglas.TradingBot.model;
 import java.time.Instant;
 
 /**
- * Market bar/candle (OHLCV) for a given timeframe.
+ * Representa um candle OHLCV para um determinado timeframe.
  *
- * Contract:
- * - timestamp: epoch second representing the candle open time (UTC).
- * - prices: double for MVP (in production consider BigDecimal).
+ * O {@code timestamp} corresponde ao epoch second do horário de abertura
+ * do candle em UTC, conforme retornado pela API da Deriv.
+ *
+ * O campo {@code volume} é sempre {@code 0.0} pois a API da Deriv não
+ * fornece volume real para forex e metais.
+ *
+ * @param timestamp epoch second do horário de abertura do candle (UTC)
+ * @param open      preço de abertura
+ * @param high      preço máximo atingido no período
+ * @param low       preço mínimo atingido no período
+ * @param close     preço de fechamento
+ * @param volume    sempre {@code 0.0} — não fornecido pela API da Deriv
  */
 public record Bar(
         Instant timestamp,
@@ -16,6 +25,5 @@ public record Bar(
         double low,
         double close,
         double volume
-) { 
-    
+) {
 }
