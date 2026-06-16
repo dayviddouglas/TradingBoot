@@ -751,7 +751,7 @@ deriv:
 
 logging:
   level:
-    com.github.dayviddouglas.TradingBot: INFO
+    com.github.dayviddouglas.TradingBoot: INFO
     org.java_websocket: WARN
 ```
 
