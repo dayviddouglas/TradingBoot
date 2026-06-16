@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 TradingBot
+# 🤖 TradingBoot
 
 **Sistema de estudo em trading algorítmico com backtest, regime de mercado,
 execução automatizada e relatórios operacionais.**
@@ -15,6 +15,7 @@ execução automatizada e relatórios operacionais.**
 
 ---
 
+
 Grande parte do conteúdo sobre trading é construída em cima de recortes,
 opiniões, exemplos isolados e interpretações que raramente passam por
 validação estatística rigorosa. Estratégias parecem funcionar quando
@@ -24,7 +25,7 @@ Quando confrontadas com histórico amplo, payout variável, custos implícitos,
 mudanças de regime e execução em tempo real, muitas dessas ideias perdem
 consistência rapidamente.
 
-TradingBot nasceu como uma resposta direta a esse problema: criar uma
+TradingBoot nasceu como uma resposta direta a esse problema: criar uma
 base técnica onde hipóteses possam ser testadas com dados reais, regras
 objetivas, execução rastreável e resultados auditáveis. Em vez de partir
 da promessa de lucro, o projeto parte de uma premissa mais simples e mais
@@ -42,7 +43,7 @@ também pode ser usado em backtests com histórico salvo em disco, o que ajuda
 a reduzir a distância entre aquilo que parece funcionar no papel e aquilo que
 sobrevive quando exposto ao runtime real.
 
-Mais do que um robô de execução, o TradingBot funciona como um laboratório
+Mais do que um robô de execução, o TradingBoot funciona como um laboratório
 de hipóteses quantitativas. Ele foi estruturado para responder perguntas
 concretas, como:
 
@@ -73,19 +74,20 @@ Esse é o propósito central do TradingBot.
 - [6. Pré-requisitos](#6-pré-requisitos)
 - [7. Como obter acesso à Deriv](#7-como-obter-acesso-à-deriv)
 - [8. Como configurar o projeto](#8-como-configurar-o-projeto)
-- [9. Estrutura de arquivos](#9-estrutura-de-arquivos)
-- [10. Como o sistema funciona](#10-como-o-sistema-funciona)
-- [11. Modos de decisão](#11-modos-de-decisão)
-- [12. Estratégias implementadas](#12-estratégias-implementadas)
-- [13. Regimes de mercado](#13-regimes-de-mercado)
-- [14. Gestão de risco](#14-gestão-de-risco)
-- [15. Relatórios gerados](#15-relatórios-gerados)
-- [16. Ferramentas auxiliares](#16-ferramentas-auxiliares)
-- [17. Backtest](#17-backtest)
-- [18. Guia de contribuição](#18-guia-de-contribuição)
-- [19. FAQ](#19-faq)
-- [20. Aviso importante](#20-aviso-importante)
-- [21. Licença](#21-licença)
+- [9. Como executar o projeto](#9-como-executar-o-projeto)
+- [10. Estrutura de arquivos](#10-estrutura-de-arquivos)
+- [11. Como o sistema funciona](#11-como-o-sistema-funciona)
+- [12. Modos de decisão](#12-modos-de-decisão)
+- [13. Estratégias implementadas](#13-estratégias-implementadas)
+- [14. Regimes de mercado](#14-regimes-de-mercado)
+- [15. Gestão de risco](#15-gestão-de-risco)
+- [16. Relatórios gerados](#16-relatórios-gerados)
+- [17. Ferramentas auxiliares](#17-ferramentas-auxiliares)
+- [18. Backtest](#18-backtest)
+- [19. Guia de contribuição](#19-guia-de-contribuição)
+- [20. FAQ](#20-faq)
+- [21. Aviso importante](#21-aviso-importante)
+
 
 </details>
 
@@ -394,7 +396,7 @@ Win rate   = 55%
 Edge       = 55% - 58.82% = -3.82 → negativo ❌
 ```
 
-> O objetivo principal do projeto é descobrir se existe edge real
+> O objetivo principal do TradingBoot é descobrir se existe edge real
 > antes de arriscar capital.
 
 </details>
@@ -531,7 +533,7 @@ O regime resume o comportamento atual do mercado:
 | `CHOPPY` | mercado confuso ou em transição |
 
 > Uma estratégia pode funcionar bem em RANGING e falhar em TRENDING,
-> ou vice-versa. O projeto tenta medir isso.
+> ou vice-versa. O TradingBoot tenta medir isso.
 
 </details>
 
@@ -566,7 +568,7 @@ O regime resume o comportamento atual do mercado:
 
 ### 7.1 Registrar o app
 
-Antes de conectar o projeto à Deriv, é necessário registrar uma aplicação
+Antes de conectar o TradingBoot à Deriv, é necessário registrar uma aplicação
 para obter o `app-id`.
 
 #### Passo a passo
@@ -672,7 +674,6 @@ deriv:
 > **Importante:** trate o token como credencial sensível.
 > Nunca publique em repositórios públicos.
 
-#### Observação técnica
 
 #### Observação técnica
 
@@ -778,7 +779,7 @@ src/main/resources/strategies.json
 
 > **Este arquivo não está no repositório.**
 > A configuração detalhada de cada estratégia com seus parâmetros
-> está documentada na [seção 12 — Estratégias implementadas](#12-estratégias-implementadas).
+> está documentada na [seção 13 — Estratégias implementadas](#13-estratégias-implementadas).
 
 Exemplo de profile:
 
@@ -840,7 +841,7 @@ Exemplo de profile:
 | `rangeLookback` | candles para filtro de volatilidade | `14` |
 | `rangeMultiplier` | multiplicador do filtro | `1.10` |
 
-Veja a [seção 14.5](#145-filtro-de-volatilidade) para explicação detalhada
+Veja a [seção 15.4](#15.4-filtro-de-volatilidade) para explicação detalhada
 de `rangeLookback` e `rangeMultiplier`.
 
 </details>
@@ -874,13 +875,246 @@ O atributo mínimo obrigatório é `enabled`:
 ```
 
 A explicação detalhada dos parâmetros de cada estratégia está na
-[seção 12 — Estratégias implementadas](#12-estratégias-implementadas).
+[seção 13 — Estratégias implementadas](#13-estratégias-implementadas).
 
 </details>
 
 ---
 
-## 9. Estrutura de arquivos
+## 9. Como executar o projeto
+
+> **Pré-requisito:** as etapas das seções
+> [7 — Como obter acesso à Deriv](#7-como-obter-acesso-à-deriv) e
+> [8 — Como configurar o projeto](#8-como-configurar-o-projeto)
+> devem estar concluídas antes de prosseguir.
+
+---
+
+### 9.1 Clonar o repositório
+
+```bash
+git clone https://github.com/dayviddouglas/TradingBoot.git
+cd TradingBoot
+```
+
+---
+
+### 9.2 Compilar o projeto
+
+```bash
+mvn clean install -DskipTests
+```
+
+Aguarde a mensagem `BUILD SUCCESS` antes de prosseguir.
+
+---
+
+### 9.3 Baixar o histórico de candles
+
+Antes de iniciar o TradingBoot, é necessário ter histórico salvo em disco.
+O histórico é usado no startup para inicializar o pipeline de cada ativo
+e confirmar o regime de mercado via warm-up.
+
+Abra a classe no IDE e ajuste os ativos desejados:
+
+```text
+src/main/java/.../tools/history/DerivHistoryDownloadTool.java
+```
+
+```java
+private static final List<String> SYMBOLS = List.of("frxEURUSD", "frxXAUUSD");
+private static final int GRANULARITY_SECONDS = 60;
+private static final int DAYS_BACK = 90;
+```
+
+Execute a classe diretamente pelo IDE (botão de play na classe `main`).
+
+O histórico será salvo em:
+
+```text
+data/history/frxEURUSD_60.json
+data/history/frxXAUUSD_60.json
+```
+
+> Esta etapa não requer autenticação. O download usa o endpoint público da Deriv.
+
+---
+
+### 9.4 Verificar a configuração antes de iniciar
+
+Antes de iniciar o TradingBoot, confirme:
+
+```text
+✅ application.yml criado com app-id, access-token e account-id
+✅ strategies.json criado com pelo menos 1 profile habilitado
+✅ Histórico baixado para os ativos configurados no strategies.json
+✅ trade.enabled: false (recomendado para os primeiros testes)
+```
+
+---
+
+### 9.5 Iniciar o TradingBoot
+
+#### Via Maven
+
+```bash
+mvn spring-boot:run
+```
+
+#### Via IDE
+
+Execute a classe principal pelo IDE:
+
+```text
+src/main/java/com/github/dayviddouglas/TradingBot/TradingBootApplication.java
+```
+
+#### Via JAR
+
+```bash
+mvn clean package -DskipTests
+java -jar target/TradingBoot-*.jar
+```
+
+---
+
+### 9.6 O que acontece no startup
+
+```text
+1. Spring Boot inicializa os beans
+2. strategies.json é carregado e validado
+3. Um pipeline é criado para cada ativo configurado
+4. DerivOtpService troca o PAT por um OTP via REST
+5. DerivWsClient conecta ao WebSocket com a URL autenticada
+6. BotInitializer valida a disponibilidade de trade por ativo
+7. Histórico de candles é carregado do disco para cada ativo
+8. Regime de mercado é confirmado via warm-up do histórico
+9. Subscrição de ticks em tempo real é iniciada por ativo
+10. TradingBoot entra em operação
+```
+
+Os logs esperados no startup bem-sucedido são:
+
+```text
+INFO  DerivOtpService      - OTP WS URL OBTAINED | url=wss://...otp=***
+INFO  DerivWsClient        - Deriv WS opened | httpStatus=101
+INFO  StrategyEngine       - HISTORY SEEDED | symbol=frxEURUSD | bars=1500
+INFO  StrategyEngine       - REGIME WARM-UP START | symbol=frxEURUSD | bars=1500
+INFO  StrategyEngine       - REGIME WARM-UP DONE | symbol=frxEURUSD | bars=1500
+INFO  PipelineRegistry     - PIPELINE REGISTERED | symbol=frxEURUSD | ...
+INFO  TickHeartbeat        - TICK HEARTBEAT | monitoring started | timeout=3min
+```
+
+---
+
+### 9.7 Monitorar a operação
+
+Os logs operacionais são exibidos no console em tempo real.
+Os principais eventos que aparecem durante a operação são:
+
+```text
+# Candle fechado e avaliado
+INFO  StrategyEngine     - FINAL SIGNAL BUY | symbol=frxEURUSD | ...
+
+# Sinal passando pelas camadas de risco
+INFO  DerivTradeService  - ATR RISK OK | symbol=frxEURUSD | ...
+INFO  TradeExecutor      - TRADE PROPOSAL OK | symbol=frxEURUSD | ...
+INFO  TradeExecutor      - TRADE BUY OK | symbol=frxEURUSD | contract_id=...
+
+# Fechamento do contrato
+INFO  TradeMonitor       - TRADE CLOSED | source=STREAM | result=WIN | profit=7.00
+
+# Mudança de regime
+INFO  RegimeStateTracker - REGIME CONFIRMED | symbol=frxEURUSD | CHOPPY → RANGING
+```
+
+---
+
+### 9.8 Parar o TradingBoot
+
+Pressione `Ctrl+C` no terminal ou use o botão de parar do IDE.
+
+O TradingBoot não possui persistência de estado entre execuções. Ao reiniciar,
+o processo de startup completo é reexecutado, incluindo warm-up de regime.
+
+---
+
+### 9.9 Verificar os relatórios gerados
+
+Após operações, os relatórios são salvos em subdiretórios por data:
+
+```text
+data/reports/
+└── 2026-06-02/
+    ├── trades_2026-06-02.csv
+    ├── trades_2026-06-02.json
+    ├── daily_summary_2026-06-02.json
+    └── regime_report_frxEURUSD_2026-06-02.json
+```
+
+Veja a [seção 16 — Relatórios gerados](#16-relatórios-gerados) para
+entender o conteúdo de cada arquivo.
+
+---
+
+### 9.10 Solução de problemas comuns no startup
+
+<details>
+<summary><strong>Erro: "OTP request failed | status=401"</strong></summary>
+
+O `access-token` está incorreto ou expirou.
+
+Verifique:
+- o token foi copiado corretamente no `application.yml`
+- o token não expirou no portal da Deriv
+- os escopos `Trade` e `Account management` estão selecionados
+
+</details>
+
+<details>
+<summary><strong>Erro: "OTP request failed | status=429"</strong></summary>
+
+Rate limit do Cloudflare. O sistema tenta novamente automaticamente
+com backoff crescente: `5s → 15s → 30s → 60s → 120s`.
+
+Aguarde e o TradingBoot se reconectará sozinho.
+
+</details>
+
+<details>
+<summary><strong>Erro: "strategies.json inválido: 'profiles' vazio ou ausente"</strong></summary>
+
+O arquivo `strategies.json` não existe ou está mal formatado.
+
+Verifique:
+- o arquivo existe em `src/main/resources/strategies.json`
+- o JSON é válido (use um validador online se necessário)
+- o campo `profiles` é um array com pelo menos 1 elemento
+
+</details>
+
+<details>
+<summary><strong>Erro: "HISTORY NOT FOUND | symbol=frxEURUSD"</strong></summary>
+
+O histórico do ativo não foi baixado.
+
+Execute `DerivHistoryDownloadTool` com o símbolo correto antes de iniciar o TradingBoot.
+
+</details>
+
+<details>
+<summary><strong>TradingBoot inicia mas não gera sinais</strong></summary>
+
+Possíveis causas:
+
+- `trade.enabled: false` — o TradingBoot avalia mas não opera (comportamento esperado em modo pesquisa)
+- filtro de volatilidade bloqueando (`rangeMultiplier` muito alto)
+- estratégias não estão gerando sinal no histórico atual (confira via backtest)
+- menos de 200 candles disponíveis para o regime ser classificado
+
+</details>
+
+## 10. Estrutura de arquivos
 
 <details>
 <summary><strong>Clique para expandir a estrutura completa</strong></summary>
@@ -933,9 +1167,9 @@ TradingBot/
 
 ---
 
-## 10. Como o sistema funciona
+## 11. Como o sistema funciona
 
-### 10.1 Startup
+### 11.1 Startup
 
 ```text
 Spring Boot inicializa
@@ -947,7 +1181,7 @@ Pipeline criado por ativo
 Conexão WebSocket iniciada via OTP
 ```
 
-### 10.2 Conexão e autenticação
+### 11.2 Conexão e autenticação
 
 ```text
 DerivOtpService.fetchWsUri()
@@ -962,7 +1196,7 @@ BotInitializer.initialize()
     └── subscreve ticks em tempo real
 ```
 
-### 10.3 Ciclo por candle
+### 11.3 Ciclo por candle
 
 ```text
 1. TickCandleAggregator fecha o candle
@@ -977,9 +1211,9 @@ BotInitializer.initialize()
 
 > O modo de decisão (SINGLE\_STRATEGY, VOTING ou CONFLUENCE)
 > determina como os sinais são combinados.
-> Veja a [seção 11 — Modos de decisão](#11-modos-de-decisão).
+> Veja a [seção 12 — Modos de decisão](#12-modos-de-decisão).
 
-### 10.4 Ciclo de trade
+### 11.4 Ciclo de trade
 
 ```text
 1. TradeValidator verifica se pode operar
@@ -992,7 +1226,7 @@ BotInitializer.initialize()
 8. Quando fecha → TradeReportService grava
 ```
 
-### 10.5 Reconexão automática
+### 11.5 Reconexão automática
 
 ```text
 Conexão cai
@@ -1008,7 +1242,7 @@ BotInitializer reexecuta o bootstrap
 
 ---
 
-## 11. Modos de decisão
+## 12. Modos de decisão
 
 O modo de decisão define **como os sinais das estratégias são combinados**
 para gerar o sinal final.
@@ -1021,7 +1255,7 @@ para gerar o sinal final.
 
 ---
 
-### 11.1 Por que o modo de decisão importa
+### 12.1 Por que o modo de decisão importa
 
 ```text
 BollingerMeanReversion → BUY
@@ -1038,7 +1272,7 @@ EmaRsi                 → SELL
 ---
 
 <details>
-<summary><strong>11.2 SINGLE_STRATEGY</strong></summary>
+<summary><strong>12.2 SINGLE_STRATEGY</strong></summary>
 
 #### Conceito
 
@@ -1064,7 +1298,7 @@ PinBar → NONE → Sistema não opera
 </details>
 
 <details>
-<summary><strong>11.3 VOTING</strong></summary>
+<summary><strong>12.3 VOTING</strong></summary>
 
 #### Conceito
 
@@ -1107,7 +1341,7 @@ Pode perder oportunidades.
 </details>
 
 <details>
-<summary><strong>11.4 CONFLUENCE</strong></summary>
+<summary><strong>12.4 CONFLUENCE</strong></summary>
 
 #### Conceito
 
@@ -1164,7 +1398,7 @@ Requer calibragem cuidadosa dos pesos.
 
 ---
 
-### 11.5 Comparativo
+### 12.5 Comparativo
 
 | Critério | SINGLE\_STRATEGY | VOTING | CONFLUENCE |
 |---|---|---|---|
@@ -1177,7 +1411,7 @@ Requer calibragem cuidadosa dos pesos.
 
 ---
 
-### 11.6 Fluxo visual
+### 12.6 Fluxo visual
 
 ```text
 SINGLE_STRATEGY:
@@ -1191,7 +1425,7 @@ CONFLUENCE:
        → Score BUY=2.7, SELL=0.6
        → Regras OK? → BUY
 ```
-## 12. Estratégias implementadas
+## 13. Estratégias implementadas
 
 > **Aviso importante:**
 > Todos os parâmetros numéricos mostrados nesta seção são
@@ -1203,7 +1437,7 @@ CONFLUENCE:
 ---
 
 <details>
-<summary><strong>12.1 BollingerMeanReversionStrategy</strong></summary>
+<summary><strong>13.1 BollingerMeanReversionStrategy</strong></summary>
 
 #### O que é reversão à média?
 
@@ -1451,7 +1685,7 @@ e existe chance de alta.
 ---
 
 <details>
-<summary><strong>12.2 ZScoreMeanReversionStrategy</strong></summary>
+<summary><strong>13.2 ZScoreMeanReversionStrategy</strong></summary>
 
 #### O que é z-score?
 
@@ -1592,7 +1826,7 @@ Menor → aceita afastamento menor → mais sinais, mais risco de falso positivo
 ---
 
 <details>
-<summary><strong>12.3 EmaRsiStrategy</strong></summary>
+<summary><strong>13.3 EmaRsiStrategy</strong></summary>
 
 #### O que esta estratégia faz?
 
@@ -1790,7 +2024,7 @@ Menor → aceita EMAs mais próximas → mais sinais → mais ruído
 </details>
 
 <details>
-<summary><strong>12.4 BreakoutStrategy</strong></summary>
+<summary><strong>13.4 BreakoutStrategy</strong></summary>
 
 #### O que é breakout?
 
@@ -1916,7 +2150,7 @@ Menor → aceita candles menores → mais sinais, mais falsos positivos
 ---
 
 <details>
-<summary><strong>12.5 PinBarStrategy</strong></summary>
+<summary><strong>13.5 PinBarStrategy</strong></summary>
 
 #### O que é um pin bar?
 
@@ -2051,7 +2285,7 @@ lookback = 15
 ---
 
 <details>
-<summary><strong>12.6 SupportResistanceStrategy</strong></summary>
+<summary><strong>13.6 SupportResistanceStrategy</strong></summary>
 
 #### O que é suporte?
 
@@ -2157,7 +2391,7 @@ Preço perto de resistência (dentro da tolerância) → SELL
 ---
 
 <details>
-<summary><strong>12.7 KeltnerChannelStrategy</strong></summary>
+<summary><strong>13.7 KeltnerChannelStrategy</strong></summary>
 
 #### O que é o Canal de Keltner?
 
@@ -2243,7 +2477,7 @@ corpo atual > corpo médio × bodyMultiplier → breakout válido
 ---
 
 <details>
-<summary><strong>12.8 DonchianBreakoutStrategy</strong></summary>
+<summary><strong>13.8 DonchianBreakoutStrategy</strong></summary>
 
 #### O que é o Canal de Donchian?
 
@@ -2337,7 +2571,7 @@ sem continuar na direção, gerando muitos falsos breakouts.
 
 ---
 
-### 12.9 Tabela comparativa
+### 13.9 Tabela comparativa
 
 | Estratégia | Tipo | Regime ideal | Falha em |
 |---|---|---|---|
@@ -2355,7 +2589,7 @@ sem continuar na direção, gerando muitos falsos breakouts.
 
 ---
 
-## 13. Regimes de mercado
+## 14. Regimes de mercado
 
 O sistema classifica o mercado em 3 regimes:
 
@@ -2368,7 +2602,7 @@ O sistema classifica o mercado em 3 regimes:
 ---
 
 <details>
-<summary><strong>13.1 Explicação detalhada de cada regime</strong></summary>
+<summary><strong>14.1 Explicação detalhada de cada regime</strong></summary>
 
 #### TRENDING
 
@@ -2419,7 +2653,7 @@ batendo nas paredes de forma aleatória.
 ---
 
 <details>
-<summary><strong>13.2 Como o sistema detecta o regime</strong></summary>
+<summary><strong>14.2 Como o sistema detecta o regime</strong></summary>
 
 O classificador combina 3 indicadores. Todos precisam concordar
 para classificar um regime.
@@ -2526,7 +2760,7 @@ ATR Ratio = 0.00134 / 0.00120 = 1.12
 ---
 
 <details>
-<summary><strong>13.3 Lógica de classificação</strong></summary>
+<summary><strong>14.3 Lógica de classificação</strong></summary>
 
 As 3 condições precisam ser verdadeiras simultaneamente:
 
@@ -2568,7 +2802,7 @@ ou alguma das outras condições não atendida
 ---
 
 <details>
-<summary><strong>13.4 Confirmação de regime</strong></summary>
+<summary><strong>14.4 Confirmação de regime</strong></summary>
 
 O sistema não muda o regime a cada minuto. Ele exige **confirmação**
 para evitar ficar trocando de regime por causa de ruído.
@@ -2640,7 +2874,7 @@ Tempo total de confirmação:
 ---
 
 <details>
-<summary><strong>13.5 Qual estratégia funciona melhor em qual regime</strong></summary>
+<summary><strong>14.5 Qual estratégia funciona melhor em qual regime</strong></summary>
 
 | Estratégia | RANGING | TRENDING | CHOPPY | Justificativa |
 |---|---|---|---|---|
@@ -2660,9 +2894,9 @@ Tempo total de confirmação:
 
 ---
 
-## 14. Gestão de risco
+## 15. Gestão de risco
 
-O sistema possui **4 camadas de proteção** que atuam em sequência
+O TradingBoot possui **4 camadas de proteção** que atuam em sequência
 antes de executar qualquer operação:
 
 ```text
@@ -2726,7 +2960,7 @@ Motivos:
 ---
 
 <details>
-<summary><strong>14.2 Gestão por ATR</strong></summary>
+<summary><strong>15.2 Gestão por ATR</strong></summary>
 
 #### O que é gestão por ATR?
 
@@ -2810,7 +3044,7 @@ ATR Ratio = 0.00200 / 0.00120 = 1.67
 ---
 
 <details>
-<summary><strong>14.3 ROI mínimo por ativo</strong></summary>
+<summary><strong>15.3 ROI mínimo por ativo</strong></summary>
 
 #### O que é ROI mínimo?
 
@@ -2897,7 +3131,7 @@ frxGBPNZD → payout médio ~68% → minRoiPercent = 65 pode ser necessário
 ---
 
 <details>
-<summary><strong>14.4 Filtro de volatilidade</strong></summary>
+<summary><strong>15.4 Filtro de volatilidade</strong></summary>
 
 #### O que é o filtro de volatilidade?
 
@@ -2991,7 +3225,7 @@ Menor → mais permissivo → mais operações → mercados calmos também passa
 ---
 
 <details>
-<summary><strong>14.5 Exemplo completo de um ciclo de proteção</strong></summary>
+<summary><strong>15.5 Exemplo completo de um ciclo de proteção</strong></summary>
 
 ```text
 Sinal recebido: BUY
@@ -3069,7 +3303,7 @@ As camadas 3 e 4 nem são verificadas.
 
 ---
 
-## 15. Relatórios gerados
+## 16. Relatórios gerados
 
 ```text
 data/reports/
@@ -3081,7 +3315,7 @@ data/reports/
 ```
 
 <details>
-<summary><strong>15.1 trades CSV e JSON</strong></summary>
+<summary><strong>16.1 trades CSV e JSON</strong></summary>
 
 Campos principais:
 
@@ -3102,7 +3336,7 @@ Campos principais:
 </details>
 
 <details>
-<summary><strong>15.2 daily_summary</strong></summary>
+<summary><strong>16.2 daily_summary</strong></summary>
 
 ```json
 {
@@ -3141,7 +3375,7 @@ Campos principais:
 </details>
 
 <details>
-<summary><strong>15.3 regime_report</strong></summary>
+<summary><strong>16.3 regime_report</strong></summary>
 
 O relatório de regime é gerado em um único arquivo JSON por ativo por dia,
 unificando os dados técnicos de transições e o resumo percentual do comportamento
@@ -3203,10 +3437,10 @@ do mercado.
 
 ---
 
-## 16. Ferramentas auxiliares
+## 17. Ferramentas auxiliares
 
 <details>
-<summary><strong>16.1 Download de histórico de candles</strong></summary>
+<summary><strong>17.1 Download de histórico de candles</strong></summary>
 
 **Classe:** `DerivHistoryDownloadTool`
 
@@ -3233,7 +3467,7 @@ data/history/frxEURUSD_60.json
 </details>
 
 <details>
-<summary><strong>16.2 Listagem de ativos</strong></summary>
+<summary><strong>17.2 Listagem de ativos</strong></summary>
 
 **Classe:** `ListOfFinancialAssets`
 
@@ -3250,7 +3484,7 @@ Contém: símbolos, contratos, famílias de trade, durações.
 </details>
 
 <details>
-<summary><strong>16.3 Conversão para PDF</strong></summary>
+<summary><strong>17.3 Conversão para PDF</strong></summary>
 
 **Classe:** `HistoryJsonToPdfTool`
 
@@ -3258,10 +3492,10 @@ Converte arquivos JSON de histórico em PDF para visualização.
 
 </details>
 
-## 17. Backtest
+## 18. Backtest
 
 <details>
-<summary><strong>17.1 O que é backtest</strong></summary>
+<summary><strong>18.1 O que é backtest</strong></summary>
 
 Simulação de uma estratégia usando dados históricos:
 
@@ -3280,7 +3514,7 @@ Simulação de uma estratégia usando dados históricos:
 </details>
 
 <details>
-<summary><strong>17.2 Passo a passo completo</strong></summary>
+<summary><strong>18.2 Passo a passo completo</strong></summary>
 
 #### Passo 1 — Baixar o histórico
 
@@ -3318,7 +3552,7 @@ src/main/java/.../backtest/BacktestRunner.java
 </details>
 
 <details>
-<summary><strong>17.3 Métricas explicadas</strong></summary>
+<summary><strong>18.3 Métricas explicadas</strong></summary>
 
 | Métrica | O que mede | Interpretação |
 |---|---|---|
@@ -3334,7 +3568,7 @@ src/main/java/.../backtest/BacktestRunner.java
 </details>
 
 <details>
-<summary><strong>17.4 Classificação automática</strong></summary>
+<summary><strong>18.4 Classificação automática</strong></summary>
 
 | Classificação | Critério |
 |---|---|
@@ -3346,7 +3580,7 @@ src/main/java/.../backtest/BacktestRunner.java
 </details>
 
 <details>
-<summary><strong>17.5 Fluxo de pesquisa recomendado</strong></summary>
+<summary><strong>18.5 Fluxo de pesquisa recomendado</strong></summary>
 
 ```text
 1. Formule hipótese
@@ -3367,10 +3601,10 @@ src/main/java/.../backtest/BacktestRunner.java
 
 ---
 
-## 18. Guia de contribuição
+## 19. Guia de contribuição
 
 <details>
-<summary><strong>18.1 Padrões de código</strong></summary>
+<summary><strong>19.1 Padrões de código</strong></summary>
 
 | Tipo | Padrão |
 |---|---|
@@ -3384,7 +3618,7 @@ src/main/java/.../backtest/BacktestRunner.java
 </details>
 
 <details>
-<summary><strong>18.2 Como adicionar uma estratégia</strong></summary>
+<summary><strong>19.2 Como adicionar uma estratégia</strong></summary>
 
 ```text
 1. Criar classe em strategy/ implementando TradingStrategy
@@ -3397,7 +3631,7 @@ src/main/java/.../backtest/BacktestRunner.java
 </details>
 
 <details>
-<summary><strong>18.3 Formato de commit</strong></summary>
+<summary><strong>19.3 Formato de commit</strong></summary>
 
 ```text
 <tipo>(escopo): descrição curta
@@ -3413,7 +3647,7 @@ Tipos: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`
 </details>
 
 <details>
-<summary><strong>18.4 Pull Request</strong></summary>
+<summary><strong>19.4 Pull Request</strong></summary>
 
 Descreva:
 
@@ -3426,10 +3660,10 @@ Descreva:
 
 ---
 
-## 19. FAQ
+## 20. FAQ
 
 <details>
-<summary><strong>Por que o bot não está operando?</strong></summary>
+<summary><strong>Por que o TradingBoot não está operando?</strong></summary>
 
 Verifique na ordem:
 
@@ -3549,7 +3783,7 @@ Descarte a hipótese e teste outra combinação.
 
 ---
 
-## 20. Aviso importante
+## 21. Aviso importante
 
 > **Este projeto é desenvolvido para fins de estudo e pesquisa.**
 
@@ -3563,11 +3797,4 @@ Descarte a hipótese e teste outra combinação.
 - Edge identificado hoje pode desaparecer amanhã
 ```
 
----
-
-## 21. Licença
-
-Este projeto está licenciado sob a [MIT License](LICENSE).
-
----
 
