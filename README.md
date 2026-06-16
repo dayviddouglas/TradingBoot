@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 TradingBoot
+<img src="assets/logo_tradingboot.png" alt="Logo_tradingboot" width="400" height="200">
 
 **Sistema de estudo em trading algorítmico com backtest, regime de mercado,
 execução automatizada e relatórios operacionais.**
