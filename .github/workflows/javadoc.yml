@@ -37,8 +37,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
+      - name: Compilar projeto
+        run: mvn compile -DskipTests
+
       - name: Gerar JavaDoc
         run: mvn javadoc:javadoc -Dencoding=UTF-8 -Ddocencoding=UTF-8 -Dcharset=UTF-8 -DfailOnError=false
+
+      - name: Verificar geração do JavaDoc
+        run: |
+          if [ ! -d "target/site/apidocs" ]; then
+            echo "❌ Diretório target/site/apidocs não encontrado"
+            exit 1
+          fi
+          echo "✅ JavaDoc gerado com sucesso"
+          ls -la target/site/apidocs
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
