@@ -57,7 +57,7 @@ concretas, como:
 Em vez de assumir que uma estratégia é boa porque "parece boa", o projeto
 busca criar um ambiente onde cada decisão possa ser rastreada, cada hipótese
 possa ser refutada e cada resultado possa ser confrontado com os dados.
-Esse é o propósito central do TradingBot.
+Esse é o propósito central do TradingBoot.
 
 ---
 
@@ -95,7 +95,7 @@ Esse é o propósito central do TradingBot.
 
 ## 1. O que é este projeto
 
-TradingBot é um sistema quantitativo-operacional que:
+TradingBoot é um sistema quantitativo-operacional que:
 
 | Funcionalidade | Descrição |
 |---|---|
@@ -1122,7 +1122,7 @@ Possíveis causas:
 ```text
 TradingBot/
 │
-├── src/main/java/com/github/dayviddouglas/TradingBot/
+├── src/main/java/com/github/dayviddouglas/TradingBoot/
 │   ├── backtest/
 │   │   ├── runner/        orquestração e configuração do backtest
 │   │   ├── result/        métricas e relatórios de resultado
@@ -2911,7 +2911,7 @@ Se **qualquer** camada reprovar, a operação **não acontece**.
 ---
 
 <details>
-<summary><strong>14.1 Stake fixo</strong></summary>
+<summary><strong>15.1 Stake fixo</strong></summary>
 
 #### O que é stake fixo?
 
@@ -3131,7 +3131,7 @@ frxGBPNZD → payout médio ~68% → minRoiPercent = 65 pode ser necessário
 ---
 
 <details>
-<summary><strong>15.4 Filtro de volatilidade</strong></summary>
+<summary id="15.4-filtro-de-volatilidade"><strong>15.4 Filtro de volatilidade</strong></summary>
 
 #### O que é o filtro de volatilidade?
 
