@@ -52,6 +52,13 @@ jobs:
           echo "✅ JavaDoc gerado com sucesso"
           ls -la target/site/apidocs
 
+      - name: Listar conteúdo do JavaDoc
+        run: |
+            echo "=== Raiz do apidocs ==="
+            ls -la target/site/apidocs/
+            echo "=== Verificando index.html ==="
+            find target/site/apidocs -name "index.html" | head -20
+
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
 
