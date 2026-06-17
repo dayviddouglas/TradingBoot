@@ -115,7 +115,7 @@
 					<charset>UTF-8</charset>
 					<show>private</show>
 					<failOnError>false</failOnError>
-					<outputDirectory>${project.build.directory}/site/apidocs</outputDirectory>
+					<outputDirectory>${project.build.directory}/javadoc</outputDirectory>
 				</configuration>
 			</plugin>
 		</plugins>
