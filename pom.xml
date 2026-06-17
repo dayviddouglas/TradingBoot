@@ -105,6 +105,19 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-javadoc-plugin</artifactId>
+				<configuration>
+					<encoding>UTF-8</encoding>
+					<docencoding>UTF-8</docencoding>
+					<charset>UTF-8</charset>
+					<show>private</show>
+					<failOnError>false</failOnError>
+					<outputDirectory>${project.build.directory}/site/apidocs</outputDirectory>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
 
