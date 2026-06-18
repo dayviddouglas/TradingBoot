@@ -44,12 +44,17 @@ jobs:
         run: mvn javadoc:javadoc -Dencoding=UTF-8 -Ddocencoding=UTF-8 -Dcharset=UTF-8 -DfailOnError=false
 
       - name: Verificar geração do JavaDoc
+        id: find_javadoc
         run: |
-          if [ ! -f "target/site/apidocs/apidocs/index.html" ]; then
-            echo "❌ index.html não encontrado"
-            exit 1
-          fi
-          echo "✅ JavaDoc gerado com sucesso"
+            JAVADOC_DIR=$(find target -name "index.html" -path "*/apidocs/*" -exec dirname {} \; | head -1)
+            if [ -z "$JAVADOC_DIR" ]; then
+              echo "❌ index.html não encontrado em nenhum diretório apidocs"
+              find target -name "index.html" || echo "Nenhum index.html encontrado em target/"
+              exit 1
+            fi
+            echo "✅ JavaDoc encontrado em: $JAVADOC_DIR"
+            ls -la "$JAVADOC_DIR"
+            echo "javadoc_path=$JAVADOC_DIR" >> $GITHUB_OUTPUT
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
