@@ -1,5 +1,10 @@
+# Workflow responsável por gerar o JavaDoc do projeto e publicá-lo
+# automaticamente no GitHub Pages a cada push na branch master.
+# A documentação fica disponível em:
+# https://dayviddouglas.github.io/TradingBoot/
 name: JavaDoc
 
+# Dispara a Action apenas em push na branch master.
 on:
   push:
     branches:
@@ -8,27 +13,40 @@ on:
 jobs:
   javadoc:
     name: Gerar e publicar JavaDoc
+
+    # Executa em uma máquina virtual Ubuntu limpa criada pelo GitHub.
     runs-on: ubuntu-latest
 
+    # Permissões necessárias para publicar no GitHub Pages.
+    # contents: read  → leitura do código do repositório
+    # pages: write    → escrita no GitHub Pages
+    # id-token: write → autenticação OIDC exigida pelo deploy-pages
     permissions:
       contents: read
       pages: write
       id-token: write
 
+    # Vincula o job ao ambiente github-pages do GitHub.
+    # A URL é preenchida automaticamente com o endereço publicado após o deploy.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      # Baixa o código do repositório para dentro da máquina virtual.
       - name: Checkout do código
         uses: actions/checkout@v4
 
+      # Instala o Java 25 usando a distribuição Temurin (Eclipse Adoptium).
+      # Necessário para executar os comandos mvn nos passos seguintes.
       - name: Configurar Java 25
         uses: actions/setup-java@v4
         with:
           java-version: '25'
           distribution: 'temurin'
 
+      # Restaura o cache das dependências do Maven entre execuções.
+      # Evita baixar todas as dependências do zero a cada push.
       - name: Cache do Maven
         uses: actions/cache@v4
         with:
@@ -37,12 +55,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
+      # Compila as classes Java antes de gerar o JavaDoc.
+      # O maven-javadoc-plugin precisa dos .class compilados para
+      # ler as anotações e assinaturas dos métodos corretamente.
       - name: Compilar projeto
         run: mvn compile -DskipTests
 
+      # Executa o maven-javadoc-plugin para gerar a documentação HTML.
+      # -DfailOnError=false garante que warnings não interrompam a geração.
+      # Os arquivos são gerados dentro do diretório target/ conforme
+      # configurado no pom.xml.
       - name: Gerar JavaDoc
         run: mvn javadoc:javadoc -Dencoding=UTF-8 -Ddocencoding=UTF-8 -Dcharset=UTF-8 -DfailOnError=false
 
+      # Localiza dinamicamente o diretório que contém o index.html gerado.
+      # Esse passo é necessário porque o Maven pode gerar o JavaDoc em
+      # caminhos diferentes dependendo da configuração do pom.xml e do ambiente.
+      # Em vez de usar um caminho fixo que pode mudar, o find busca o index.html
+      # dentro de qualquer subdiretório apidocs e retorna o diretório pai.
+      # O caminho encontrado é salvo como output variable para ser reutilizado
+      # no passo de upload via ${{ steps.find_javadoc.outputs.javadoc_path }}.
       - name: Localizar index.html gerado
         id: find_javadoc
         run: |
@@ -56,14 +88,22 @@ jobs:
           ls -la "$JAVADOC_DIR"
           echo "javadoc_path=$JAVADOC_DIR" >> $GITHUB_OUTPUT
 
+      # Prepara o ambiente do GitHub Pages para receber o deploy.
+      # Valida que o repositório está configurado com GitHub Actions como source.
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
 
+      # Empacota o diretório que contém o index.html como artifact github-pages.
+      # Usa o caminho dinâmico descoberto no passo anterior para garantir que
+      # o index.html esteja sempre na raiz do artifact enviado ao GitHub Pages.
       - name: Upload do JavaDoc
         uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ steps.find_javadoc.outputs.javadoc_path }}
 
+      # Publica o artifact github-pages no GitHub Pages.
+      # Após esse passo, a documentação fica disponível em:
+      # https://dayviddouglas.github.io/TradingBoot/
       - name: Deploy no GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

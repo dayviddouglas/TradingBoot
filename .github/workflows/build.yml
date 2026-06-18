@@ -1,5 +1,10 @@
+# Workflow responsável por compilar o projeto automaticamente a cada
+# push ou pull_request na branch master, garantindo que nenhum código
+# quebrado entre na branch principal.
 name: Build
 
+# Dispara a Action em push e pull_request na branch master.
+# Pull requests também são verificados antes de serem mesclados.
 on:
   push:
     branches:
@@ -11,18 +16,28 @@ on:
 jobs:
   build:
     name: Compilar projeto
+
+    # Executa em uma máquina virtual Ubuntu limpa criada pelo GitHub.
     runs-on: ubuntu-latest
 
     steps:
+      # Baixa o código do repositório para dentro da máquina virtual.
+      # Sem esse passo, os comandos seguintes não teriam acesso ao projeto.
       - name: Checkout do código
         uses: actions/checkout@v4
 
+      # Instala o Java 25 usando a distribuição Temurin (Eclipse Adoptium).
+      # Necessário para que os comandos mvn funcionem corretamente.
       - name: Configurar Java 25
         uses: actions/setup-java@v4
         with:
           java-version: '25'
           distribution: 'temurin'
 
+      # Restaura o cache das dependências do Maven entre execuções.
+      # A key é baseada no hash do pom.xml: se o arquivo mudar,
+      # o cache é invalidado e as dependências são baixadas novamente.
+      # Isso evita baixar todas as dependências do zero a cada push.
       - name: Cache do Maven
         uses: actions/cache@v4
         with:
@@ -31,8 +46,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
+      # Compila o projeto e instala o artifact no repositório local do Maven.
+      # -DskipTests ignora os testes para focar apenas na compilação.
+      # Se o build falhar aqui, o GitHub sinaliza o problema com ❌ no commit.
       - name: Compilar com Maven
         run: mvn clean install -DskipTests
 
+      # Confirma no log que o build foi concluído sem erros.
       - name: Verificar build bem-sucedido
         run: echo "Build concluído com sucesso"
