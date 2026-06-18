@@ -43,18 +43,18 @@ jobs:
       - name: Gerar JavaDoc
         run: mvn javadoc:javadoc -Dencoding=UTF-8 -Ddocencoding=UTF-8 -Dcharset=UTF-8 -DfailOnError=false
 
-      - name: Verificar geração do JavaDoc
+      - name: Localizar index.html gerado
         id: find_javadoc
         run: |
-            JAVADOC_DIR=$(find target -name "index.html" -path "*/apidocs/*" -exec dirname {} \; | head -1)
-            if [ -z "$JAVADOC_DIR" ]; then
-              echo "❌ index.html não encontrado em nenhum diretório apidocs"
-              find target -name "index.html" || echo "Nenhum index.html encontrado em target/"
-              exit 1
-            fi
-            echo "✅ JavaDoc encontrado em: $JAVADOC_DIR"
-            ls -la "$JAVADOC_DIR"
-            echo "javadoc_path=$JAVADOC_DIR" >> $GITHUB_OUTPUT
+          JAVADOC_DIR=$(find target -name "index.html" -path "*/apidocs/*" -exec dirname {} \; | head -1)
+          if [ -z "$JAVADOC_DIR" ]; then
+            echo "❌ index.html não encontrado em nenhum diretório apidocs"
+            find target -name "index.html" || echo "Nenhum index.html encontrado em target/"
+            exit 1
+          fi
+          echo "✅ JavaDoc encontrado em: $JAVADOC_DIR"
+          ls -la "$JAVADOC_DIR"
+          echo "javadoc_path=$JAVADOC_DIR" >> $GITHUB_OUTPUT
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
@@ -62,7 +62,7 @@ jobs:
       - name: Upload do JavaDoc
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/site/apidocs/apidocs
+          path: ${{ steps.find_javadoc.outputs.javadoc_path }}
 
       - name: Deploy no GitHub Pages
         id: deployment
