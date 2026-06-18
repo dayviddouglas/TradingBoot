@@ -11,6 +11,9 @@ execução automatizada e relatórios operacionais.**
 ![WebSocket](https://img.shields.io/badge/WebSocket-Deriv-blue?logo=websocket)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
+<a href="https://dayviddouglas.github.io/TradingBoot/" title="Abrir documentação técnica do TradingBoot">
+<img src="https://img.shields.io/badge/Explorar-JavaDoc-24292F?style=for-the-badge&logo=github&logoColor=white" alt="Explorar JavaDoc">
+</a>
 </div>
 
 ---
