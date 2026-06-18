@@ -45,19 +45,11 @@ jobs:
 
       - name: Verificar geração do JavaDoc
         run: |
-          if [ ! -f "target/javadoc/apidocs/index.html" ]; then
-            echo "❌ index.html não encontrado em target/javadoc/apidocs"
+          if [ ! -f "target/site/apidocs/apidocs/index.html" ]; then
+            echo "❌ index.html não encontrado"
             exit 1
           fi
           echo "✅ JavaDoc gerado com sucesso"
-          ls -la target/javadoc/apidocs
-
-      - name: Listar conteúdo do JavaDoc
-        run: |
-            echo "=== Raiz do apidocs ==="
-            ls -la target/site/apidocs/
-            echo "=== Verificando index.html ==="
-            find target/site/apidocs -name "index.html" | head -20
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v4
@@ -65,7 +57,7 @@ jobs:
       - name: Upload do JavaDoc
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/javadoc/apidocs
+          path: target/site/apidocs/apidocs
 
       - name: Deploy no GitHub Pages
         id: deployment
